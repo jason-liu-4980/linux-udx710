@@ -19,6 +19,7 @@ description: |
 properties:
   compatible:
     oneOf:
+      - const: sprd,sc2730-bltc
       - items:
           - enum:
               - sprd,sc2730-bltc

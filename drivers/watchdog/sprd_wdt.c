@@ -13,6 +13,8 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
@@ -54,7 +56,7 @@
 
 #define SPRD_WDT_CNT_HIGH_SHIFT		16
 #define SPRD_WDT_LOW_VALUE_MASK		GENMASK(15, 0)
-#define SPRD_WDT_LOAD_TIMEOUT		11
+#define SPRD_WDT_LOAD_POLLS 12
 
 struct sprd_wdt {
 	void __iomem *base;
@@ -62,6 +64,12 @@ struct sprd_wdt {
 	struct clk *enable;
 	struct clk *rtc_enable;
 	int irq;
+	struct mutex mutex;
+	spinlock_t reg_lock;
+	bool clocks_on;
+	bool suspended;
+	bool strict_lifecycle;
+	bool resume_running;
 };
 
 static inline struct sprd_wdt *to_sprd_wdt(struct watchdog_device *wdd)
@@ -69,24 +77,61 @@ static inline struct sprd_wdt *to_sprd_wdt(struct watchdog_device *wdd)
 	return container_of(wdd, struct sprd_wdt, wdd);
 }
 
-static inline void sprd_wdt_lock(void __iomem *addr)
+static void sprd_wdt_update_ctrl(struct sprd_wdt *wdt, u32 clear, u32 set)
 {
-	writel_relaxed(0x0, addr + SPRD_WDT_LOCK);
+	unsigned long flags;
+	u32 value;
+
+	spin_lock_irqsave(&wdt->reg_lock, flags);
+	writel(SPRD_WDT_UNLOCK_KEY, wdt->base + SPRD_WDT_LOCK);
+	value = readl(wdt->base + SPRD_WDT_CTRL);
+	writel((value & ~clear) | set, wdt->base + SPRD_WDT_CTRL);
+	writel(0, wdt->base + SPRD_WDT_LOCK);
+	spin_unlock_irqrestore(&wdt->reg_lock, flags);
 }
 
-static inline void sprd_wdt_unlock(void __iomem *addr)
+static int sprd_wdt_wait_load(struct sprd_wdt *wdt)
 {
-	writel_relaxed(SPRD_WDT_UNLOCK_KEY, addr + SPRD_WDT_LOCK);
+	int i;
+
+	/* 2-3 RTC ticks normally suffice. Check the final allowed sample too. */
+	for (i = 0; i < SPRD_WDT_LOAD_POLLS; i++) {
+		if (!(readl(wdt->base + SPRD_WDT_INT_RAW) &
+		      SPRD_WDT_LD_BUSY_BIT))
+			return 0;
+		if (i + 1 < SPRD_WDT_LOAD_POLLS)
+			usleep_range(10, 100);
+	}
+	return -EBUSY;
 }
 
-static irqreturn_t sprd_wdt_isr(int irq, void *dev_id)
+static int sprd_wdt_validate(u32 timeout, u32 pretimeout)
 {
-	struct sprd_wdt *wdt = (struct sprd_wdt *)dev_id;
+	/* Validate before multiplication; even UINT_MAX cannot wrap into range. */
+	if (timeout < SPRD_WDT_MIN_TIMEOUT || timeout > SPRD_WDT_MAX_TIMEOUT ||
+	    pretimeout >= timeout)
+		return -EINVAL;
+	return 0;
+}
 
-	sprd_wdt_unlock(wdt->base);
-	writel_relaxed(SPRD_WDT_INT_CLEAR_BIT, wdt->base + SPRD_WDT_INT_CLR);
-	sprd_wdt_lock(wdt->base);
-	watchdog_notify_pretimeout(&wdt->wdd);
+static irqreturn_t sprd_wdt_isr(int irq, void *data)
+{
+	struct sprd_wdt *wdt = data;
+	unsigned long flags;
+	bool notify;
+
+	spin_lock_irqsave(&wdt->reg_lock, flags);
+	if (!(readl(wdt->base + SPRD_WDT_INT_RAW) & SPRD_WDT_INT_EN_BIT)) {
+		spin_unlock_irqrestore(&wdt->reg_lock, flags);
+		return IRQ_NONE;
+	}
+	notify = readl(wdt->base + SPRD_WDT_CTRL) & SPRD_WDT_INT_EN_BIT;
+	writel(SPRD_WDT_UNLOCK_KEY, wdt->base + SPRD_WDT_LOCK);
+	writel(SPRD_WDT_INT_EN_BIT, wdt->base + SPRD_WDT_INT_CLR);
+	writel(0, wdt->base + SPRD_WDT_LOCK);
+	spin_unlock_irqrestore(&wdt->reg_lock, flags);
+	if (notify)
+		watchdog_notify_pretimeout(&wdt->wdd);
 	return IRQ_HANDLED;
 }
 
@@ -105,47 +150,40 @@ static u32 sprd_wdt_get_cnt_value(struct sprd_wdt *wdt)
 static int sprd_wdt_load_value(struct sprd_wdt *wdt, u32 timeout,
 			       u32 pretimeout)
 {
-	u32 val, delay_cnt = 0;
-	u32 tmr_step = timeout * SPRD_WDT_CNT_STEP;
-	u32 prtmr_step = pretimeout * SPRD_WDT_CNT_STEP;
+	unsigned long flags;
+	u32 ticks, irq_ticks;
+	int ret;
 
-	/*
-	 * Checking busy bit to make sure the previous loading operation is
-	 * done. According to the specification, the busy bit would be set
-	 * after a new loading operation and last 2 or 3 RTC clock
-	 * cycles (about 60us~92us).
-	 */
-	do {
-		val = readl_relaxed(wdt->base + SPRD_WDT_INT_RAW);
-		if (!(val & SPRD_WDT_LD_BUSY_BIT))
-			break;
+	ret = sprd_wdt_validate(timeout, pretimeout);
+	if (ret)
+		return ret;
+	if (!wdt->clocks_on)
+		return -EIO;
+	ret = sprd_wdt_wait_load(wdt);
+	if (ret)
+		return ret;
 
-		usleep_range(10, 100);
-	} while (delay_cnt++ < SPRD_WDT_LOAD_TIMEOUT);
+	ticks = timeout * SPRD_WDT_CNT_STEP;
+	irq_ticks = pretimeout * SPRD_WDT_CNT_STEP;
+	spin_lock_irqsave(&wdt->reg_lock, flags);
+	writel(SPRD_WDT_UNLOCK_KEY, wdt->base + SPRD_WDT_LOCK);
+	writel(ticks >> 16, wdt->base + SPRD_WDT_LOAD_HIGH);
+	writel(ticks & 0xffff, wdt->base + SPRD_WDT_LOAD_LOW);
+	writel(irq_ticks >> 16, wdt->base + SPRD_WDT_IRQ_LOAD_HIGH);
+	writel(irq_ticks & 0xffff, wdt->base + SPRD_WDT_IRQ_LOAD_LOW);
+	writel(0, wdt->base + SPRD_WDT_LOCK);
+	spin_unlock_irqrestore(&wdt->reg_lock, flags);
 
-	if (delay_cnt >= SPRD_WDT_LOAD_TIMEOUT)
-		return -EBUSY;
-
-	sprd_wdt_unlock(wdt->base);
-	writel_relaxed((tmr_step >> SPRD_WDT_CNT_HIGH_SHIFT) &
-		      SPRD_WDT_LOW_VALUE_MASK, wdt->base + SPRD_WDT_LOAD_HIGH);
-	writel_relaxed((tmr_step & SPRD_WDT_LOW_VALUE_MASK),
-		       wdt->base + SPRD_WDT_LOAD_LOW);
-	writel_relaxed((prtmr_step >> SPRD_WDT_CNT_HIGH_SHIFT) &
-			SPRD_WDT_LOW_VALUE_MASK,
-		       wdt->base + SPRD_WDT_IRQ_LOAD_HIGH);
-	writel_relaxed(prtmr_step & SPRD_WDT_LOW_VALUE_MASK,
-		       wdt->base + SPRD_WDT_IRQ_LOAD_LOW);
-	sprd_wdt_lock(wdt->base);
-
-	return 0;
+	/* A failure here means the hardware outcome is uncertain, not rolled back. */
+	return sprd_wdt_wait_load(wdt);
 }
 
 static int sprd_wdt_enable(struct sprd_wdt *wdt)
 {
-	u32 val;
 	int ret;
 
+	if (wdt->clocks_on)
+		return 0;
 	ret = clk_prepare_enable(wdt->enable);
 	if (ret)
 		return ret;
@@ -154,85 +192,91 @@ static int sprd_wdt_enable(struct sprd_wdt *wdt)
 		clk_disable_unprepare(wdt->enable);
 		return ret;
 	}
-
-	sprd_wdt_unlock(wdt->base);
-	val = readl_relaxed(wdt->base + SPRD_WDT_CTRL);
-	val |= SPRD_WDT_NEW_VER_EN;
-	writel_relaxed(val, wdt->base + SPRD_WDT_CTRL);
-	sprd_wdt_lock(wdt->base);
+	wdt->clocks_on = true;
 	return 0;
 }
 
-static void sprd_wdt_disable(void *_data)
+static void sprd_wdt_disable(void *data)
 {
-	struct sprd_wdt *wdt = _data;
+	struct sprd_wdt *wdt = data;
 
-	sprd_wdt_unlock(wdt->base);
-	writel_relaxed(0x0, wdt->base + SPRD_WDT_CTRL);
-	sprd_wdt_lock(wdt->base);
-
+	/* Never stop firmware-started or nowayout hardware during error unwind. */
+	if (!wdt->clocks_on || watchdog_hw_running(&wdt->wdd))
+		return;
 	clk_disable_unprepare(wdt->rtc_enable);
 	clk_disable_unprepare(wdt->enable);
+	wdt->clocks_on = false;
 }
 
 static int sprd_wdt_start(struct watchdog_device *wdd)
 {
 	struct sprd_wdt *wdt = to_sprd_wdt(wdd);
-	u32 val;
 	int ret;
 
+	mutex_lock(&wdt->mutex);
 	ret = sprd_wdt_load_value(wdt, wdd->timeout, wdd->pretimeout);
-	if (ret)
-		return ret;
-
-	sprd_wdt_unlock(wdt->base);
-	val = readl_relaxed(wdt->base + SPRD_WDT_CTRL);
-	val |= SPRD_WDT_CNT_EN_BIT | SPRD_WDT_INT_EN_BIT | SPRD_WDT_RST_EN_BIT;
-	writel_relaxed(val, wdt->base + SPRD_WDT_CTRL);
-	sprd_wdt_lock(wdt->base);
-	set_bit(WDOG_HW_RUNNING, &wdd->status);
-
-	return 0;
+	if (!ret) {
+		sprd_wdt_update_ctrl(
+			wdt, SPRD_WDT_INT_EN_BIT,
+			SPRD_WDT_NEW_VER_EN | SPRD_WDT_CNT_EN_BIT |
+				SPRD_WDT_RST_EN_BIT |
+				(wdd->pretimeout ? SPRD_WDT_INT_EN_BIT : 0));
+		set_bit(WDOG_HW_RUNNING, &wdd->status);
+	}
+	mutex_unlock(&wdt->mutex);
+	return ret;
 }
 
 static int sprd_wdt_stop(struct watchdog_device *wdd)
 {
 	struct sprd_wdt *wdt = to_sprd_wdt(wdd);
-	u32 val;
+	int ret = 0;
 
-	sprd_wdt_unlock(wdt->base);
-	val = readl_relaxed(wdt->base + SPRD_WDT_CTRL);
-	val &= ~(SPRD_WDT_CNT_EN_BIT | SPRD_WDT_RST_EN_BIT |
-		SPRD_WDT_INT_EN_BIT);
-	writel_relaxed(val, wdt->base + SPRD_WDT_CTRL);
-	sprd_wdt_lock(wdt->base);
-	return 0;
+	mutex_lock(&wdt->mutex);
+	if (test_bit(WDOG_NO_WAY_OUT, &wdd->status)) {
+		ret = -EBUSY;
+	} else if (!wdt->clocks_on) {
+		ret = -EIO;
+	} else {
+		sprd_wdt_update_ctrl(wdt,
+				     SPRD_WDT_CNT_EN_BIT | SPRD_WDT_RST_EN_BIT |
+					     SPRD_WDT_INT_EN_BIT,
+				     0);
+		clear_bit(WDOG_HW_RUNNING, &wdd->status);
+	}
+	mutex_unlock(&wdt->mutex);
+	return ret;
 }
 
-static int sprd_wdt_set_timeout(struct watchdog_device *wdd,
-				u32 timeout)
+static int sprd_wdt_set_timeout(struct watchdog_device *wdd, u32 timeout)
 {
 	struct sprd_wdt *wdt = to_sprd_wdt(wdd);
+	int ret;
 
-	if (timeout == wdd->timeout)
-		return 0;
-
-	wdd->timeout = timeout;
-
-	return sprd_wdt_load_value(wdt, timeout, wdd->pretimeout);
+	mutex_lock(&wdt->mutex);
+	ret = sprd_wdt_load_value(wdt, timeout, wdd->pretimeout);
+	if (!ret)
+		wdd->timeout = timeout;
+	mutex_unlock(&wdt->mutex);
+	return ret;
 }
 
-static int sprd_wdt_set_pretimeout(struct watchdog_device *wdd,
-				   u32 new_pretimeout)
+static int sprd_wdt_set_pretimeout(struct watchdog_device *wdd, u32 pretimeout)
 {
 	struct sprd_wdt *wdt = to_sprd_wdt(wdd);
+	int ret;
 
-	if (new_pretimeout < wdd->min_timeout)
-		return -EINVAL;
-
-	wdd->pretimeout = new_pretimeout;
-
-	return sprd_wdt_load_value(wdt, wdd->timeout, new_pretimeout);
+	mutex_lock(&wdt->mutex);
+	ret = sprd_wdt_load_value(wdt, wdd->timeout, pretimeout);
+	if (!ret) {
+		sprd_wdt_update_ctrl(wdt, SPRD_WDT_INT_EN_BIT,
+				     watchdog_hw_running(wdd) && pretimeout ?
+					     SPRD_WDT_INT_EN_BIT :
+					     0);
+		wdd->pretimeout = pretimeout;
+	}
+	mutex_unlock(&wdt->mutex);
+	return ret;
 }
 
 static u32 sprd_wdt_get_timeleft(struct watchdog_device *wdd)
@@ -253,6 +297,15 @@ static const struct watchdog_ops sprd_wdt_ops = {
 	.get_timeleft = sprd_wdt_get_timeleft,
 };
 
+/* Orca counter sampling has not been established: do not expose timeleft. */
+static const struct watchdog_ops sprd_wdt_orca_ops = {
+	.owner = THIS_MODULE,
+	.start = sprd_wdt_start,
+	.stop = sprd_wdt_stop,
+	.set_timeout = sprd_wdt_set_timeout,
+	.set_pretimeout = sprd_wdt_set_pretimeout,
+};
+
 static const struct watchdog_info sprd_wdt_info = {
 	.options = WDIOF_SETTIMEOUT |
 		   WDIOF_PRETIMEOUT |
@@ -265,76 +318,105 @@ static int sprd_wdt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct sprd_wdt *wdt;
-	int ret;
+	u32 ctrl;
+	int irq, ret;
 
 	wdt = devm_kzalloc(dev, sizeof(*wdt), GFP_KERNEL);
 	if (!wdt)
 		return -ENOMEM;
-
+	mutex_init(&wdt->mutex);
+	spin_lock_init(&wdt->reg_lock);
 	wdt->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(wdt->base))
 		return PTR_ERR(wdt->base);
-
 	wdt->enable = devm_clk_get(dev, "enable");
-	if (IS_ERR(wdt->enable)) {
-		dev_err(dev, "can't get the enable clock\n");
+	if (IS_ERR(wdt->enable))
 		return PTR_ERR(wdt->enable);
-	}
-
 	wdt->rtc_enable = devm_clk_get(dev, "rtc_enable");
-	if (IS_ERR(wdt->rtc_enable)) {
-		dev_err(dev, "can't get the rtc enable clock\n");
+	if (IS_ERR(wdt->rtc_enable))
 		return PTR_ERR(wdt->rtc_enable);
-	}
-
-	wdt->irq = platform_get_irq(pdev, 0);
-	if (wdt->irq < 0)
-		return wdt->irq;
-
-	ret = devm_request_irq(dev, wdt->irq, sprd_wdt_isr, IRQF_NO_SUSPEND,
-			       "sprd-wdt", (void *)wdt);
-	if (ret)
-		return ret;
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
+	wdt->irq = irq;
 
 	wdt->wdd.info = &sprd_wdt_info;
-	wdt->wdd.ops = &sprd_wdt_ops;
+	wdt->strict_lifecycle = !!of_device_get_match_data(dev);
+	wdt->wdd.ops = wdt->strict_lifecycle ? &sprd_wdt_orca_ops :
+					       &sprd_wdt_ops;
 	wdt->wdd.parent = dev;
 	wdt->wdd.min_timeout = SPRD_WDT_MIN_TIMEOUT;
 	wdt->wdd.max_timeout = SPRD_WDT_MAX_TIMEOUT;
 	wdt->wdd.timeout = SPRD_WDT_MAX_TIMEOUT;
-
-	ret = sprd_wdt_enable(wdt);
-	if (ret) {
-		dev_err(dev, "failed to enable wdt\n");
-		return ret;
-	}
-	ret = devm_add_action_or_reset(dev, sprd_wdt_disable, wdt);
-	if (ret) {
-		dev_err(dev, "Failed to add wdt disable action\n");
-		return ret;
-	}
-
 	watchdog_set_nowayout(&wdt->wdd, WATCHDOG_NOWAYOUT);
-	watchdog_init_timeout(&wdt->wdd, 0, dev);
-
-	ret = devm_watchdog_register_device(dev, &wdt->wdd);
+	ret = watchdog_init_timeout(&wdt->wdd, 0, dev);
+	if (ret)
+		return ret;
+	ret = sprd_wdt_enable(wdt);
+	if (ret)
+		return ret;
+	ctrl = readl(wdt->base + SPRD_WDT_CTRL);
+	if (ctrl & SPRD_WDT_CNT_EN_BIT)
+		set_bit(WDOG_HW_RUNNING, &wdt->wdd.status);
+	ret = devm_add_action_or_reset(dev, sprd_wdt_disable, wdt);
+	if (ret)
+		return ret;
+	/* Do not reinterpret an inherited legacy or interrupt-only counter. */
+	if (watchdog_hw_running(&wdt->wdd) &&
+	    (ctrl & (SPRD_WDT_NEW_VER_EN | SPRD_WDT_RST_EN_BIT)) !=
+		    (SPRD_WDT_NEW_VER_EN | SPRD_WDT_RST_EN_BIT))
+		return dev_err_probe(
+			dev, -EOPNOTSUPP,
+			"firmware watchdog uses unsupported counter/reset mode\n");
+	ret = devm_request_irq(dev, irq, sprd_wdt_isr,
+			       wdt->strict_lifecycle ? 0 : IRQF_NO_SUSPEND,
+			       dev_name(dev), wdt);
 	if (ret)
 		return ret;
 
+	/* Establish a known deadline before handing a running timer to the core. */
+	if (watchdog_hw_running(&wdt->wdd)) {
+		ret = sprd_wdt_start(&wdt->wdd);
+		if (ret)
+			return dev_err_probe(
+				dev, ret,
+				"firmware watchdog takeover failed\n");
+	} else {
+		sprd_wdt_update_ctrl(wdt,
+				     SPRD_WDT_INT_EN_BIT | SPRD_WDT_RST_EN_BIT,
+				     SPRD_WDT_NEW_VER_EN);
+	}
+	ret = devm_watchdog_register_device(dev, &wdt->wdd);
+	if (ret)
+		return ret;
 	platform_set_drvdata(pdev, wdt);
-
 	return 0;
 }
 
 static int __maybe_unused sprd_wdt_pm_suspend(struct device *dev)
 {
 	struct sprd_wdt *wdt = dev_get_drvdata(dev);
+	int ret = 0;
 
-	if (watchdog_active(&wdt->wdd))
-		sprd_wdt_stop(&wdt->wdd);
-	sprd_wdt_disable(wdt);
-
-	return 0;
+	if (!wdt->strict_lifecycle && watchdog_active(&wdt->wdd)) {
+		ret = sprd_wdt_stop(&wdt->wdd);
+		if (ret)
+			return ret;
+		wdt->resume_running = true;
+	}
+	mutex_lock(&wdt->mutex);
+	/* No proven autonomous feeding/clock retention contract across sleep. */
+	if (watchdog_hw_running(&wdt->wdd) ||
+	    (wdt->strict_lifecycle && watchdog_active(&wdt->wdd))) {
+		ret = -EBUSY;
+	} else if (!wdt->suspended) {
+		/* Drain an in-flight handler before making its registers inaccessible. */
+		disable_irq(wdt->irq);
+		sprd_wdt_disable(wdt);
+		wdt->suspended = true;
+	}
+	mutex_unlock(&wdt->mutex);
+	return ret;
 }
 
 static int __maybe_unused sprd_wdt_pm_resume(struct device *dev)
@@ -342,13 +424,18 @@ static int __maybe_unused sprd_wdt_pm_resume(struct device *dev)
 	struct sprd_wdt *wdt = dev_get_drvdata(dev);
 	int ret;
 
+	mutex_lock(&wdt->mutex);
 	ret = sprd_wdt_enable(wdt);
-	if (ret)
-		return ret;
-
-	if (watchdog_active(&wdt->wdd))
+	if (!ret && wdt->suspended) {
+		wdt->suspended = false;
+		enable_irq(wdt->irq);
+	}
+	mutex_unlock(&wdt->mutex);
+	if (!ret && wdt->resume_running) {
 		ret = sprd_wdt_start(&wdt->wdd);
-
+		if (!ret)
+			wdt->resume_running = false;
+	}
 	return ret;
 }
 
@@ -357,8 +444,14 @@ static const struct dev_pm_ops sprd_wdt_pm_ops = {
 				sprd_wdt_pm_resume)
 };
 
+static const bool sprd_wdt_orca_strict_lifecycle = true;
+
 static const struct of_device_id sprd_wdt_match_table[] = {
-	{ .compatible = "sprd,sp9860-wdt", },
+	{
+		.compatible = "sprd,sp9860-wdt",
+	},
+	{ .compatible = "sprd,orca-wdt",
+	  .data = &sprd_wdt_orca_strict_lifecycle },
 	{},
 };
 MODULE_DEVICE_TABLE(of, sprd_wdt_match_table);
@@ -369,10 +462,12 @@ static struct platform_driver sprd_watchdog_driver = {
 		.name = "sprd-wdt",
 		.of_match_table = sprd_wdt_match_table,
 		.pm = &sprd_wdt_pm_ops,
+		/* A running timer must not lose its feeding owner through sysfs. */
+		.suppress_bind_attrs = true,
 	},
 };
 module_platform_driver(sprd_watchdog_driver);
 
 MODULE_AUTHOR("Eric Long <eric.long@spreadtrum.com>");
 MODULE_DESCRIPTION("Spreadtrum Watchdog Timer Controller Driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");

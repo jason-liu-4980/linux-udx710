@@ -442,9 +442,43 @@ static irqreturn_t sprd_i2c_isr(int irq, void *dev_id)
 	return IRQ_WAKE_THREAD;
 }
 
+/* Orca DT provides all three clocks; never substitute a guessed 26 MHz. */
+static int sprd_orca_i2c_clk_init(struct sprd_i2c *i2c_dev)
+{
+	struct device *dev = i2c_dev->dev;
+	struct clk *mux, *source;
+	unsigned long rate;
+	int ret;
+
+	mux = devm_clk_get(dev, "i2c");
+	if (IS_ERR(mux))
+		return dev_err_probe(dev, PTR_ERR(mux),
+				     "missing I2C mux clock\n");
+	source = devm_clk_get(dev, "source");
+	if (IS_ERR(source))
+		return dev_err_probe(dev, PTR_ERR(source),
+				     "missing I2C source clock\n");
+	i2c_dev->clk = devm_clk_get(dev, "enable");
+	if (IS_ERR(i2c_dev->clk))
+		return dev_err_probe(dev, PTR_ERR(i2c_dev->clk),
+				     "missing I2C gate clock\n");
+	ret = clk_set_parent(mux, source);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "cannot set I2C source parent\n");
+	rate = clk_get_rate(mux);
+	if (rate < 4 * i2c_dev->bus_freq || rate > U32_MAX)
+		return dev_err_probe(dev, -EINVAL, "invalid I2C source rate\n");
+	i2c_dev->src_clk = rate;
+	return 0;
+}
+
 static int sprd_i2c_clk_init(struct sprd_i2c *i2c_dev)
 {
 	struct clk *clk_i2c, *clk_parent;
+
+	if (of_device_is_compatible(i2c_dev->dev->of_node, "sprd,orca-i2c"))
+		return sprd_orca_i2c_clk_init(i2c_dev);
 
 	clk_i2c = devm_clk_get(i2c_dev->dev, "i2c");
 	if (IS_ERR(clk_i2c)) {
@@ -631,7 +665,12 @@ static const struct dev_pm_ops sprd_i2c_pm_ops = {
 };
 
 static const struct of_device_id sprd_i2c_of_match[] = {
-	{ .compatible = "sprd,sc9860-i2c", },
+	{
+		.compatible = "sprd,sc9860-i2c",
+	},
+	{
+		.compatible = "sprd,orca-i2c",
+	},
 	{},
 };
 MODULE_DEVICE_TABLE(of, sprd_i2c_of_match);
@@ -649,4 +688,4 @@ static struct platform_driver sprd_i2c_driver = {
 module_platform_driver(sprd_i2c_driver);
 
 MODULE_DESCRIPTION("Spreadtrum I2C controller driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");

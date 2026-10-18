@@ -51,10 +51,10 @@
 #define SPRD_EIC_SYNC_DATA		0x1c
 
 /*
- * The digital-chip EIC controller can support maximum 3 banks, and each bank
+ * The digital-chip EIC controller can support maximum 4 banks, and each bank
  * contains 8 EICs.
  */
-#define SPRD_EIC_MAX_BANK		3
+#define SPRD_EIC_MAX_BANK 4
 #define SPRD_EIC_PER_BANK_NR		8
 #define SPRD_EIC_DATA_MASK		GENMASK(7, 0)
 #define SPRD_EIC_BIT(x)			((x) & (SPRD_EIC_PER_BANK_NR - 1))
@@ -108,6 +108,7 @@ static struct sprd_eic *to_sprd_eic(struct notifier_block *nb)
 
 struct sprd_eic_variant_data {
 	enum sprd_eic_type type;
+	u8 num_banks; /* Zero retains the existing optional 1..3-bank ABI. */
 };
 
 static const char *sprd_eic_label_name[SPRD_EIC_MAX] = {
@@ -129,6 +130,26 @@ static const struct sprd_eic_variant_data sc9860_eic_async_data = {
 
 static const struct sprd_eic_variant_data sc9860_eic_sync_data = {
 	.type = SPRD_EIC_SYNC,
+};
+
+static const struct sprd_eic_variant_data sharkl5_eic_dbnc_data = {
+	.type = SPRD_EIC_DEBOUNCE,
+	.num_banks = 4,
+};
+
+static const struct sprd_eic_variant_data sharkl5_eic_latch_data = {
+	.type = SPRD_EIC_LATCH,
+	.num_banks = 4,
+};
+
+static const struct sprd_eic_variant_data sharkl5_eic_async_data = {
+	.type = SPRD_EIC_ASYNC,
+	.num_banks = 4,
+};
+
+static const struct sprd_eic_variant_data sharkl5_eic_sync_data = {
+	.type = SPRD_EIC_SYNC,
+	.num_banks = 4,
 };
 
 static inline void __iomem *sprd_eic_offset_base(struct sprd_eic *sprd_eic,
@@ -635,9 +656,10 @@ static int sprd_eic_probe(struct platform_device *pdev)
 	if (sprd_eic->irq < 0)
 		return sprd_eic->irq;
 
-	for (i = 0; i < SPRD_EIC_MAX_BANK; i++) {
+	for (i = 0; i < (pdata->num_banks ?: 3); i++) {
 		/*
-		 * We can have maximum 3 banks EICs, and each EIC has
+		 * Orca/SharkL5 have four banks; legacy variants allow up to
+		 * three. Each EIC bank has
 		 * its own base address. But some platform maybe only
 		 * have one bank EIC, thus base[1] and base[2] can be
 		 * optional.
@@ -652,6 +674,10 @@ static int sprd_eic_probe(struct platform_device *pdev)
 
 		num_banks++;
 	}
+
+	if (!num_banks || (pdata->num_banks && num_banks != pdata->num_banks))
+		return dev_err_probe(dev, -EINVAL,
+				     "missing EIC bank resource\n");
 
 	sprd_eic->chip.label = sprd_eic_label_name[sprd_eic->type];
 	sprd_eic->chip.ngpio = num_banks * SPRD_EIC_PER_BANK_NR;
@@ -702,6 +728,38 @@ static int sprd_eic_probe(struct platform_device *pdev)
 
 static const struct of_device_id sprd_eic_of_match[] = {
 	{
+		.compatible = "sprd,orca-eic-debounce",
+		.data = &sharkl5_eic_dbnc_data,
+	},
+	{
+		.compatible = "sprd,orca-eic-latch",
+		.data = &sharkl5_eic_latch_data,
+	},
+	{
+		.compatible = "sprd,orca-eic-async",
+		.data = &sharkl5_eic_async_data,
+	},
+	{
+		.compatible = "sprd,orca-eic-sync",
+		.data = &sharkl5_eic_sync_data,
+	},
+	{
+		.compatible = "sprd,sharkl5-eic-debounce",
+		.data = &sharkl5_eic_dbnc_data,
+	},
+	{
+		.compatible = "sprd,sharkl5-eic-latch",
+		.data = &sharkl5_eic_latch_data,
+	},
+	{
+		.compatible = "sprd,sharkl5-eic-async",
+		.data = &sharkl5_eic_async_data,
+	},
+	{
+		.compatible = "sprd,sharkl5-eic-sync",
+		.data = &sharkl5_eic_sync_data,
+	},
+	{
 		.compatible = "sprd,sc9860-eic-debounce",
 		.data = &sc9860_eic_dbnc_data,
 	},
@@ -734,4 +792,4 @@ static struct platform_driver sprd_eic_driver = {
 module_platform_driver(sprd_eic_driver);
 
 MODULE_DESCRIPTION("Spreadtrum EIC driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");

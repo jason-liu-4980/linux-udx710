@@ -50,6 +50,32 @@ struct sprd_pins_info {
 	unsigned int reg;
 };
 
+/**
+ * struct sprd_pinctrl_soc_data - SoC-specific register layout and encoding
+ * @common_pin_offset: first common pin register, relative to controller base
+ * @misc_pin_offset: first miscellaneous pin register
+ * @pull_up_20k: register value selecting the 20 kiloohm pull-up
+ * @pull_up_4_7k: register value selecting the 4.7 kiloohm pull-up
+ * @sleep_mode_mask: supported sleep-domain bits, before SLEEP_MODE_SHIFT
+ * @use_dt_path_names: key groups by full DT path instead of node basename
+ * @legacy_pinconf: keep SC9860 raw readback and legacy config behavior
+ *
+ * Pin-table ordering remains global, common, then miscellaneous pins.
+ */
+struct sprd_pinctrl_soc_data {
+	unsigned int common_pin_offset;
+	unsigned int misc_pin_offset;
+	unsigned int pull_up_20k;
+	unsigned int pull_up_4_7k;
+	unsigned int sleep_mode_mask;
+	unsigned int legacy_pinconf;
+	unsigned int use_dt_path_names;
+};
+
+int sprd_pinctrl_core_probe_with_data(
+	struct platform_device *pdev,
+	const struct sprd_pins_info *sprd_soc_pin_info, int pins_cnt,
+	const struct sprd_pinctrl_soc_data *soc_data);
 int sprd_pinctrl_core_probe(struct platform_device *pdev,
 			    struct sprd_pins_info *sprd_soc_pin_info,
 			    int pins_cnt);

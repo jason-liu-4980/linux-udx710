@@ -80,6 +80,7 @@
 
 struct sdhci_sprd_host {
 	u32 version;
+	bool is_r11p1;
 	struct clk *clk_sdio;
 	struct clk *clk_enable;
 	struct clk *clk_2x_enable;
@@ -113,11 +114,16 @@ static const struct sdhci_sprd_phy_cfg sdhci_sprd_phy_cfgs[] = {
 	{ "sprd,phy-delay-mmc-hs400es", MMC_TIMING_MMC_HS400 + 1, },
 };
 
-#define TO_SPRD_HOST(host) sdhci_pltfm_priv(sdhci_priv(host))
+#define TO_SPRD_HOST(host) \
+	((struct sdhci_sprd_host *)sdhci_pltfm_priv(sdhci_priv(host)))
 
 static void sdhci_sprd_init_config(struct sdhci_host *host)
 {
 	u16 val;
+
+	/* R11P1 BSP does not program the later DLL-backup register. */
+	if (TO_SPRD_HOST(host)->is_r11p1)
+		return;
 
 	/* set dll backup mode */
 	val = sdhci_readl(host, SDHCI_SPRD_REG_DEBOUNCE);
@@ -257,9 +263,12 @@ static inline void _sdhci_sprd_set_clock(struct sdhci_host *host,
 static void sdhci_sprd_enable_phy_dll(struct sdhci_host *host)
 {
 	u32 tmp;
+	bool r11p1 = TO_SPRD_HOST(host)->is_r11p1;
 
 	tmp = sdhci_readl(host, SDHCI_SPRD_REG_32_DLL_CFG);
 	tmp &= ~(SDHCI_SPRD_DLL_EN | SDHCI_SPRD_DLL_ALL_CPST_EN);
+	if (r11p1)
+		tmp &= ~BIT(16); /* BSP DLL_HALF_MODE */
 	sdhci_writel(host, tmp, SDHCI_SPRD_REG_32_DLL_CFG);
 	/* wait 1ms */
 	usleep_range(1000, 1250);
@@ -267,6 +276,8 @@ static void sdhci_sprd_enable_phy_dll(struct sdhci_host *host)
 	tmp = sdhci_readl(host, SDHCI_SPRD_REG_32_DLL_CFG);
 	tmp |= SDHCI_SPRD_DLL_ALL_CPST_EN | SDHCI_SPRD_DLL_SEARCH_MODE |
 		SDHCI_SPRD_DLL_INIT_COUNT | SDHCI_SPRD_DLL_PHASE_INTERNAL;
+	if (r11p1)
+		tmp |= GENMASK(31, 30) | BIT(5); /* BSP WAIT_CNT/CPST_THRES */
 	sdhci_writel(host, tmp, SDHCI_SPRD_REG_32_DLL_CFG);
 	/* wait 1ms */
 	usleep_range(1000, 1250);
@@ -319,6 +330,9 @@ static void sdhci_sprd_set_clock(struct sdhci_host *host, unsigned int clock)
 static unsigned int sdhci_sprd_get_max_clock(struct sdhci_host *host)
 {
 	struct sdhci_sprd_host *sprd_host = TO_SPRD_HOST(host);
+
+	if (sprd_host->is_r11p1)
+		return sprd_host->base_rate;
 
 	return clk_round_rate(sprd_host->clk_sdio, ULONG_MAX);
 }
@@ -701,22 +715,70 @@ static int sdhci_sprd_execute_sd_hs_data_tuning(struct mmc_host *mmc, struct mmc
 	return sdhci_sprd_tuning(mmc, card, SDHCI_SPRD_TUNING_SD_HS_DATA);
 }
 
-static void sdhci_sprd_phy_param_parse(struct sdhci_sprd_host *sprd_host,
-				       struct device_node *np)
+static int sdhci_sprd_phy_param_parse(struct sdhci_sprd_host *sprd_host,
+				      struct device_node *np)
 {
+	static const char *const r11p1_properties[] = {
+		"sprd,legacy-dly", "sprd,sdhs-dly",  "sprd,sdr50-dly",
+		"sprd,sdr104-dly", "sprd,mmchs-dly", "sprd,ddr52-dly",
+		"sprd,hs200-dly",  "sprd,hs400-dly", "sprd,hs400es-dly",
+	};
 	u32 *p = sprd_host->phy_delay;
-	int ret, i, index;
+	int ret, i, index, j;
 	u32 val[4];
 
 	for (i = 0; i < ARRAY_SIZE(sdhci_sprd_phy_cfgs); i++) {
-		ret = of_property_read_u32_array(np,
-				sdhci_sprd_phy_cfgs[i].property, val, 4);
-		if (ret)
-			continue;
+		const char *property = sprd_host->is_r11p1 ?
+					       r11p1_properties[i] :
+					       sdhci_sprd_phy_cfgs[i].property;
 
+		if (!of_property_present(np, property))
+			continue;
+		ret = of_property_read_u32_array(np, property, val, 4);
+		if (ret) {
+			if (sprd_host->is_r11p1)
+				return ret;
+			continue;
+		}
+		if (sprd_host->is_r11p1) {
+			if (of_property_count_u32_elems(np, property) != 4)
+				return -EINVAL;
+			for (j = 0; j < 4; j++)
+				if (val[j] > 0xff)
+					return -ERANGE;
+		}
 		index = sdhci_sprd_phy_cfgs[i].timing;
 		p[index] = val[0] | (val[1] << 8) | (val[2] << 16) | (val[3] << 24);
 	}
+	return 0;
+}
+
+static int sdhci_sprd_r11p1_clocks(struct platform_device *pdev,
+				   struct sdhci_sprd_host *host)
+{
+	struct device *dev = &pdev->dev;
+	struct clk *source;
+	unsigned long rate;
+	int ret;
+
+	host->clk_sdio = devm_clk_get(dev, "sdio_clk");
+	if (IS_ERR(host->clk_sdio))
+		return PTR_ERR(host->clk_sdio);
+	source = devm_clk_get(dev, "sdio_clk_source");
+	if (IS_ERR(source))
+		return PTR_ERR(source);
+	host->clk_enable = devm_clk_get(dev, "sdio_ahb_enable");
+	if (IS_ERR(host->clk_enable))
+		return PTR_ERR(host->clk_enable);
+	ret = clk_set_parent(host->clk_sdio, source);
+	if (ret)
+		return ret;
+	rate = clk_get_rate(host->clk_sdio);
+	if (!rate || rate > U32_MAX)
+		return -EINVAL;
+	host->base_rate = rate;
+	/* Stock Orca has no separate 2x/1x gate resources. */
+	return 0;
 }
 
 static const struct sdhci_pltfm_data sdhci_sprd_pdata = {
@@ -772,10 +834,17 @@ static int sdhci_sprd_probe(struct platform_device *pdev)
 		host->always_defer_done = true;
 
 	sprd_host = TO_SPRD_HOST(host);
-	sdhci_sprd_phy_param_parse(sprd_host, pdev->dev.of_node);
+	sprd_host->is_r11p1 =
+		of_device_is_compatible(pdev->dev.of_node, "sprd,sdhc-r11p1");
+	ret = sdhci_sprd_phy_param_parse(sprd_host, pdev->dev.of_node);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret,
+				     "invalid PHY delay cells\n");
 
 	sprd_host->pinctrl = devm_pinctrl_get(&pdev->dev);
-	if (!IS_ERR(sprd_host->pinctrl)) {
+	if (!IS_ERR(sprd_host->pinctrl) &&
+	    (!sprd_host->is_r11p1 ||
+	     of_property_present(pdev->dev.of_node, "pinctrl-0"))) {
 		sprd_host->pins_uhs =
 			pinctrl_lookup_state(sprd_host->pinctrl, "state_uhs");
 		if (IS_ERR(sprd_host->pins_uhs))
@@ -787,22 +856,29 @@ static int sdhci_sprd_probe(struct platform_device *pdev)
 			return PTR_ERR(sprd_host->pins_default);
 	}
 
-	clk = devm_clk_get(&pdev->dev, "sdio");
-	if (IS_ERR(clk))
-		return PTR_ERR(clk);
-	sprd_host->clk_sdio = clk;
-	sprd_host->base_rate = clk_get_rate(sprd_host->clk_sdio);
-	if (!sprd_host->base_rate)
-		sprd_host->base_rate = SDHCI_SPRD_CLK_DEF_RATE;
+	if (sprd_host->is_r11p1) {
+		ret = sdhci_sprd_r11p1_clocks(pdev, sprd_host);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret,
+					     "R11P1 clock setup failed\n");
+	} else {
+		clk = devm_clk_get(&pdev->dev, "sdio");
+		if (IS_ERR(clk))
+			return PTR_ERR(clk);
+		sprd_host->clk_sdio = clk;
+		sprd_host->base_rate = clk_get_rate(sprd_host->clk_sdio);
+		if (!sprd_host->base_rate)
+			sprd_host->base_rate = SDHCI_SPRD_CLK_DEF_RATE;
 
-	clk = devm_clk_get(&pdev->dev, "enable");
-	if (IS_ERR(clk))
-		return PTR_ERR(clk);
-	sprd_host->clk_enable = clk;
+		clk = devm_clk_get(&pdev->dev, "enable");
+		if (IS_ERR(clk))
+			return PTR_ERR(clk);
+		sprd_host->clk_enable = clk;
 
-	clk = devm_clk_get(&pdev->dev, "2x_enable");
-	if (!IS_ERR(clk))
-		sprd_host->clk_2x_enable = clk;
+		clk = devm_clk_get(&pdev->dev, "2x_enable");
+		if (!IS_ERR(clk))
+			sprd_host->clk_2x_enable = clk;
+	}
 
 	ret = clk_prepare_enable(sprd_host->clk_sdio);
 	if (ret)
@@ -902,8 +978,13 @@ static void sdhci_sprd_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id sdhci_sprd_of_match[] = {
-	{ .compatible = "sprd,sdhci-r11", },
-	{ }
+	{
+		.compatible = "sprd,sdhci-r11",
+	},
+	{
+		.compatible = "sprd,sdhc-r11p1",
+	},
+	{}
 };
 MODULE_DEVICE_TABLE(of, sdhci_sprd_of_match);
 
@@ -972,5 +1053,5 @@ static struct platform_driver sdhci_sprd_driver = {
 module_platform_driver(sdhci_sprd_driver);
 
 MODULE_DESCRIPTION("Spreadtrum sdio host controller r11 driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:sdhci-sprd-r11");

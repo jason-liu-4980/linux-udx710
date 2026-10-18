@@ -29,8 +29,6 @@
 #include "pinctrl-sprd.h"
 
 #define PINCTRL_BIT_MASK(width)		(~(~0UL << (width)))
-#define PINCTRL_REG_OFFSET		0x20
-#define PINCTRL_REG_MISC_OFFSET		0x4020
 #define PINCTRL_REG_LEN			0x4
 
 #define PIN_FUNC_MASK			(BIT(4) | BIT(5))
@@ -70,8 +68,7 @@
 #define SLEEP_PULL_UP_MASK		0x1
 #define SLEEP_PULL_UP_SHIFT		3
 
-#define PULL_UP_4_7K			(BIT(12) | BIT(7))
-#define PULL_UP_20K			BIT(7)
+#define PULL_UP_BITS (BIT(12) | BIT(7))
 #define PULL_UP_MASK			0x21
 #define PULL_UP_SHIFT			7
 
@@ -118,11 +115,13 @@ struct sprd_pin {
  * @name: group name
  * @npins: pin numbers of this group
  * @pins: pointer to pins array
+ * @parse_error: deferred error for an invalid DT group
  */
 struct sprd_pin_group {
 	const char *name;
 	unsigned int npins;
 	unsigned int *pins;
+	int parse_error;
 };
 
 /**
@@ -147,12 +146,24 @@ struct sprd_pinctrl_soc_info {
  * @pctl: pointer to the pinctrl handle
  * @base: base address of the controller
  * @info: pointer to SoC's pins description information
+ * @soc_data: SoC-specific register offsets and field encodings
  */
 struct sprd_pinctrl {
 	struct device *dev;
 	struct pinctrl_dev *pctl;
 	void __iomem *base;
 	struct sprd_pinctrl_soc_info *info;
+	const struct sprd_pinctrl_soc_data *soc_data;
+};
+
+/* Preserve the existing three-argument SC9860 API and register semantics. */
+static const struct sprd_pinctrl_soc_data sprd_sc9860_soc_data = {
+	.common_pin_offset = 0x20,
+	.misc_pin_offset = 0x4020,
+	.pull_up_20k = BIT(7),
+	.pull_up_4_7k = BIT(12) | BIT(7),
+	.sleep_mode_mask = GENMASK(4, 0),
+	.legacy_pinconf = 1,
 };
 
 #define SPRD_PIN_CONFIG_CONTROL		(PIN_CONFIG_END + 1)
@@ -235,6 +246,11 @@ static int sprd_pctrl_group_pins(struct pinctrl_dev *pctldev,
 	if (selector >= info->ngroups)
 		return -EINVAL;
 
+	if (info->groups[selector].parse_error)
+		return info->groups[selector].parse_error;
+	if (!info->groups[selector].npins)
+		return -EINVAL;
+
 	*pins = info->groups[selector].pins;
 	*npins = info->groups[selector].npins;
 
@@ -256,11 +272,25 @@ static int sprd_dt_node_to_map(struct pinctrl_dev *pctldev,
 	enum pinctrl_map_type type;
 	int ret;
 
-	grp = sprd_pinctrl_find_group_by_name(pctl, np->name);
+	if (pctl->soc_data->use_dt_path_names) {
+		char *name = kasprintf(GFP_KERNEL, "%pOF", np);
+
+		if (!name)
+			return -ENOMEM;
+		grp = sprd_pinctrl_find_group_by_name(pctl, name);
+		kfree(name);
+	} else {
+		grp = sprd_pinctrl_find_group_by_name(pctl, np->name);
+	}
 	if (!grp) {
 		dev_err(pctl->dev, "unable to find group for node %pOF\n", np);
 		return -EINVAL;
 	}
+
+	if (grp->parse_error)
+		return grp->parse_error;
+	if (!grp->npins)
+		return -EINVAL;
 
 	ret = of_property_count_strings(np, "pins");
 	if (ret < 0)
@@ -386,12 +416,19 @@ static int sprd_pmx_set_mux(struct pinctrl_dev *pctldev,
 {
 	struct sprd_pinctrl *pctl = pinctrl_dev_get_drvdata(pctldev);
 	struct sprd_pinctrl_soc_info *info = pctl->info;
-	struct sprd_pin_group *grp = &info->groups[group_selector];
-	unsigned int i, grp_pins = grp->npins;
+	struct sprd_pin_group *grp;
+	unsigned int i, grp_pins;
 	unsigned long reg;
 	unsigned int val = 0;
 
-	if (group_selector >= info->ngroups)
+	if (group_selector >= info->ngroups || func_selector >= PIN_FUNC_MAX)
+		return -EINVAL;
+
+	grp = &info->groups[group_selector];
+	if (grp->parse_error)
+		return grp->parse_error;
+	grp_pins = grp->npins;
+	if (!grp_pins)
 		return -EINVAL;
 
 	switch (func_selector) {
@@ -434,6 +471,10 @@ static const struct pinmux_ops sprd_pmx_ops = {
 	.set_mux = sprd_pmx_set_mux,
 };
 
+static const unsigned int sprd_pinconf_drive_strengths[] = {
+	2, 4, 6, 8, 10, 12, 14, 16, 20, 21, 24, 25, 27, 29, 31, 33,
+};
+
 static int sprd_pinconf_get(struct pinctrl_dev *pctldev, unsigned int pin_id,
 			    unsigned long *config)
 {
@@ -462,9 +503,13 @@ static int sprd_pinconf_get(struct pinctrl_dev *pctldev, unsigned int pin_id,
 			break;
 		case PIN_CONFIG_INPUT_ENABLE:
 			arg = (reg >> SLEEP_INPUT_SHIFT) & SLEEP_INPUT_MASK;
+			if (!pctl->soc_data->legacy_pinconf && !arg)
+				return -EINVAL;
 			break;
 		case PIN_CONFIG_OUTPUT_ENABLE:
 			arg = reg & SLEEP_OUTPUT_MASK;
+			if (!pctl->soc_data->legacy_pinconf && !arg)
+				return -EINVAL;
 			break;
 		case PIN_CONFIG_BIAS_HIGH_IMPEDANCE:
 			if ((reg & SLEEP_OUTPUT) || (reg & SLEEP_INPUT))
@@ -475,8 +520,16 @@ static int sprd_pinconf_get(struct pinctrl_dev *pctldev, unsigned int pin_id,
 		case PIN_CONFIG_DRIVE_STRENGTH:
 			arg = (reg >> DRIVE_STRENGTH_SHIFT) &
 				DRIVE_STRENGTH_MASK;
+			if (!pctl->soc_data->legacy_pinconf)
+				arg = sprd_pinconf_drive_strengths[arg];
 			break;
 		case PIN_CONFIG_BIAS_PULL_DOWN:
+			if (!pctl->soc_data->legacy_pinconf) {
+				if (!(reg & PULL_DOWN))
+					return -EINVAL;
+				arg = 1;
+				break;
+			}
 			/* combine sleep pull down and pull down config */
 			arg = ((reg >> SLEEP_PULL_DOWN_SHIFT) &
 			       SLEEP_PULL_DOWN_MASK) << 16;
@@ -484,21 +537,38 @@ static int sprd_pinconf_get(struct pinctrl_dev *pctldev, unsigned int pin_id,
 			break;
 		case PIN_CONFIG_INPUT_SCHMITT_ENABLE:
 			arg = (reg >> INPUT_SCHMITT_SHIFT) & INPUT_SCHMITT_MASK;
+			if (!pctl->soc_data->legacy_pinconf && !arg)
+				return -EINVAL;
 			break;
 		case PIN_CONFIG_BIAS_PULL_UP:
+			/* Generic get has no sleep-state selector: read active bias. */
+			if (!pctl->soc_data->legacy_pinconf) {
+				unsigned int pull = reg & PULL_UP_BITS;
+
+				if (pull == pctl->soc_data->pull_up_20k)
+					arg = 20000;
+				else if (pull == pctl->soc_data->pull_up_4_7k)
+					arg = 4700;
+				else
+					return -EINVAL;
+				break;
+			}
 			/* combine sleep pull up and pull up config */
 			arg = ((reg >> SLEEP_PULL_UP_SHIFT) &
 			       SLEEP_PULL_UP_MASK) << 16;
 			arg |= (reg >> PULL_UP_SHIFT) & PULL_UP_MASK;
 			break;
 		case PIN_CONFIG_BIAS_DISABLE:
-			if ((reg & (SLEEP_PULL_DOWN | SLEEP_PULL_UP)) ||
-			    (reg & (PULL_DOWN | PULL_UP_4_7K | PULL_UP_20K)))
+			if ((reg & (PULL_DOWN | PULL_UP_BITS)) ||
+			    (pctl->soc_data->legacy_pinconf &&
+			     (reg & (SLEEP_PULL_DOWN | SLEEP_PULL_UP))))
 				return -EINVAL;
 
 			arg = 1;
 			break;
 		case PIN_CONFIG_SLEEP_HARDWARE_STATE:
+			if (!pctl->soc_data->legacy_pinconf)
+				return -ENOTSUPP;
 			arg = 0;
 			break;
 		default:
@@ -512,7 +582,7 @@ static int sprd_pinconf_get(struct pinctrl_dev *pctldev, unsigned int pin_id,
 	return 0;
 }
 
-static unsigned int sprd_pinconf_drive(unsigned int mA)
+static int sprd_pinconf_drive(unsigned int mA)
 {
 	unsigned int val = 0;
 
@@ -565,7 +635,7 @@ static unsigned int sprd_pinconf_drive(unsigned int mA)
 		val |= BIT(22) | BIT(21) | BIT(20) | BIT(19);
 		break;
 	default:
-		break;
+		return -EINVAL;
 	}
 
 	return val;
@@ -593,7 +663,7 @@ static int sprd_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin_id,
 	struct sprd_pin *pin = sprd_pinctrl_get_pin_by_id(pctl, pin_id);
 	bool is_sleep_config;
 	unsigned long reg;
-	int i;
+	int i, ret;
 
 	if (!pin)
 		return -EINVAL;
@@ -626,10 +696,15 @@ static int sprd_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin_id,
 				if (arg & CM4_SLEEP)
 					val |= CM4_SLEEP_MODE;
 
+				val &= pctl->soc_data->sleep_mode_mask
+				       << SLEEP_MODE_SHIFT;
 				mask = SLEEP_MODE_MASK;
 				shift = SLEEP_MODE_SHIFT;
 				break;
 			case PIN_CONFIG_INPUT_ENABLE:
+				if (!pctl->soc_data->legacy_pinconf &&
+				    !is_sleep_config)
+					return -ENOTSUPP;
 				if (is_sleep_config == true) {
 					if (arg > 0)
 						val |= SLEEP_INPUT;
@@ -641,6 +716,9 @@ static int sprd_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin_id,
 				}
 				break;
 			case PIN_CONFIG_OUTPUT_ENABLE:
+				if (!pctl->soc_data->legacy_pinconf &&
+				    !is_sleep_config)
+					return -ENOTSUPP;
 				if (is_sleep_config == true) {
 					if (arg > 0)
 						val |= SLEEP_OUTPUT;
@@ -652,16 +730,20 @@ static int sprd_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin_id,
 				}
 				break;
 			case PIN_CONFIG_BIAS_HIGH_IMPEDANCE:
+				if (!pctl->soc_data->legacy_pinconf &&
+				    !is_sleep_config)
+					return -ENOTSUPP;
 				if (is_sleep_config == true) {
 					val = shift = 0;
 					mask = SLEEP_OUTPUT | SLEEP_INPUT;
 				}
 				break;
 			case PIN_CONFIG_DRIVE_STRENGTH:
-				if (arg < 2 || arg > 60)
-					return -EINVAL;
+				ret = sprd_pinconf_drive(arg);
+				if (ret < 0)
+					return ret;
 
-				val = sprd_pinconf_drive(arg);
+				val = ret;
 				mask = DRIVE_STRENGTH_MASK;
 				shift = DRIVE_STRENGTH_SHIFT;
 				break;
@@ -692,9 +774,13 @@ static int sprd_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin_id,
 					shift = SLEEP_PULL_UP_SHIFT;
 				} else {
 					if (arg == 20000)
-						val |= PULL_UP_20K;
+						val |= pctl->soc_data
+							       ->pull_up_20k;
 					else if (arg == 4700)
-						val |= PULL_UP_4_7K;
+						val |= pctl->soc_data
+							       ->pull_up_4_7k;
+					else if (!pctl->soc_data->legacy_pinconf)
+						return -EINVAL;
 
 					mask = PULL_UP_MASK;
 					shift = PULL_UP_SHIFT;
@@ -706,8 +792,7 @@ static int sprd_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin_id,
 					mask = SLEEP_PULL_DOWN | SLEEP_PULL_UP;
 				} else {
 					val = shift = 0;
-					mask = PULL_DOWN | PULL_UP_20K |
-						PULL_UP_4_7K;
+					mask = PULL_DOWN | PULL_UP_BITS;
 				}
 				break;
 			case PIN_CONFIG_SLEEP_HARDWARE_STATE:
@@ -749,6 +834,10 @@ static int sprd_pinconf_group_get(struct pinctrl_dev *pctldev,
 		return -EINVAL;
 
 	grp = &info->groups[selector];
+	if (grp->parse_error)
+		return grp->parse_error;
+	if (!grp->npins)
+		return -EINVAL;
 	pin_id = grp->pins[0];
 
 	return sprd_pinconf_get(pctldev, pin_id, config);
@@ -768,6 +857,10 @@ static int sprd_pinconf_group_set(struct pinctrl_dev *pctldev,
 		return -EINVAL;
 
 	grp = &info->groups[selector];
+	if (grp->parse_error)
+		return grp->parse_error;
+	if (!grp->npins)
+		return -EINVAL;
 
 	for (i = 0; i < grp->npins; i++) {
 		unsigned int pin_id = grp->pins[i];
@@ -876,19 +969,28 @@ static struct pinctrl_desc sprd_pinctrl_desc = {
 	.owner = THIS_MODULE,
 };
 
-static int sprd_pinctrl_parse_groups(struct device_node *np,
-				     struct sprd_pinctrl *sprd_pctl,
-				     struct sprd_pin_group *grp)
+static int sprd_pinctrl_parse_group_pins(struct device_node *np,
+					 struct sprd_pinctrl *sprd_pctl,
+					 struct sprd_pin_group *grp)
 {
 	struct property *prop;
 	const char *pin_name;
 	int ret, i = 0;
 
-	ret = of_property_count_strings(np, "pins");
-	if (ret < 0)
-		return ret;
+	if (sprd_pctl->soc_data->use_dt_path_names) {
+		/* full_name can be only a unit name; %pOF walks the ancestry. */
+		grp->name =
+			devm_kasprintf(sprd_pctl->dev, GFP_KERNEL, "%pOF", np);
+		if (!grp->name)
+			return -ENOMEM;
+	} else {
+		grp->name = np->name;
+	}
 
-	grp->name = np->name;
+	ret = of_property_count_strings(np, "pins");
+	if (ret <= 0)
+		return ret ? ret : -EINVAL;
+
 	grp->npins = ret;
 	grp->pins = devm_kcalloc(sprd_pctl->dev,
 				 grp->npins, sizeof(unsigned int),
@@ -898,8 +1000,9 @@ static int sprd_pinctrl_parse_groups(struct device_node *np,
 
 	of_property_for_each_string(np, "pins", prop, pin_name) {
 		ret = sprd_pinctrl_get_id_by_name(sprd_pctl, pin_name);
-		if (ret >= 0)
-			grp->pins[i++] = ret;
+		if (ret < 0)
+			return ret;
+		grp->pins[i++] = ret;
 	}
 
 	for (i = 0; i < grp->npins; i++) {
@@ -911,20 +1014,64 @@ static int sprd_pinctrl_parse_groups(struct device_node *np,
 	return 0;
 }
 
+static int sprd_pinctrl_parse_groups(struct device_node *np,
+				     struct sprd_pinctrl *sprd_pctl,
+				     struct sprd_pin_group *grp)
+{
+	int ret = sprd_pinctrl_parse_group_pins(np, sprd_pctl, grp);
+
+	if (!ret || (ret != -EINVAL && ret != -ENODEV && ret != -ENODATA &&
+		     ret != -EILSEQ))
+		return ret;
+
+	/* Keep the group discoverable, but reject it before mapping or MMIO. */
+	devm_kfree(sprd_pctl->dev, grp->pins);
+	grp->pins = NULL;
+	grp->npins = 0;
+	grp->parse_error = ret;
+	dev_warn(sprd_pctl->dev, "invalid pin group %pOF: %d\n", np, ret);
+
+	return 0;
+}
+
 static unsigned int sprd_pinctrl_get_groups(struct device_node *np)
 {
 	struct device_node *child;
 	unsigned int group_cnt, cnt;
 
-	group_cnt = of_get_child_count(np);
+	group_cnt = of_get_available_child_count(np);
 
-	for_each_child_of_node(np, child) {
-		cnt = of_get_child_count(child);
+	for_each_available_child_of_node(np, child) {
+		cnt = of_get_available_child_count(child);
 		if (cnt > 0)
 			group_cnt += cnt;
 	}
 
 	return group_cnt;
+}
+
+static void sprd_pinctrl_validate_group_names(struct sprd_pinctrl *sprd_pctl)
+{
+	struct sprd_pinctrl_soc_info *info = sprd_pctl->info;
+	unsigned int i, j;
+
+	for (i = 0; i < info->ngroups; i++) {
+		for (j = 0; j < i; j++) {
+			struct sprd_pin_group *a = &info->groups[i];
+			struct sprd_pin_group *b = &info->groups[j];
+
+			if (strcmp(a->name, b->name))
+				continue;
+			/* Name lookup must never select a different node's group. */
+			devm_kfree(sprd_pctl->dev, a->pins);
+			devm_kfree(sprd_pctl->dev, b->pins);
+			a->pins = b->pins = NULL;
+			a->npins = b->npins = 0;
+			a->parse_error = b->parse_error = -EINVAL;
+			dev_warn(sprd_pctl->dev,
+				 "duplicate pin group name %s\n", a->name);
+		}
+	}
 }
 
 static int sprd_pinctrl_parse_dt(struct sprd_pinctrl *sprd_pctl)
@@ -958,7 +1105,7 @@ static int sprd_pinctrl_parse_dt(struct sprd_pinctrl *sprd_pctl)
 	temp = info->grp_names;
 	grp = info->groups;
 
-	for_each_child_of_node_scoped(np, child) {
+	for_each_available_child_of_node_scoped(np, child) {
 		ret = sprd_pinctrl_parse_groups(child, sprd_pctl, grp);
 		if (ret)
 			return ret;
@@ -966,8 +1113,9 @@ static int sprd_pinctrl_parse_dt(struct sprd_pinctrl *sprd_pctl)
 		*temp++ = grp->name;
 		grp++;
 
-		if (of_get_child_count(child) > 0) {
-			for_each_child_of_node_scoped(child, sub_child) {
+		if (of_get_available_child_count(child) > 0) {
+			for_each_available_child_of_node_scoped(child,
+								sub_child) {
 				ret = sprd_pinctrl_parse_groups(sub_child,
 								sprd_pctl, grp);
 				if (ret)
@@ -979,11 +1127,13 @@ static int sprd_pinctrl_parse_dt(struct sprd_pinctrl *sprd_pctl)
 		}
 	}
 
+	sprd_pinctrl_validate_group_names(sprd_pctl);
+
 	return 0;
 }
 
 static int sprd_pinctrl_add_pins(struct sprd_pinctrl *sprd_pctl,
-				 struct sprd_pins_info *sprd_soc_pin_info,
+				 const struct sprd_pins_info *sprd_soc_pin_info,
 				 int pins_cnt)
 {
 	struct sprd_pinctrl_soc_info *info = sprd_pctl->info;
@@ -1013,13 +1163,13 @@ static int sprd_pinctrl_add_pins(struct sprd_pinctrl *sprd_pctl,
 			ctrl_pin++;
 		} else if (pin->type == COMMON_PIN) {
 			pin->reg = (unsigned long)sprd_pctl->base +
-				PINCTRL_REG_OFFSET + PINCTRL_REG_LEN *
-				(i - ctrl_pin);
+				   sprd_pctl->soc_data->common_pin_offset +
+				   PINCTRL_REG_LEN * (i - ctrl_pin);
 			com_pin++;
 		} else if (pin->type == MISC_PIN) {
 			pin->reg = (unsigned long)sprd_pctl->base +
-				PINCTRL_REG_MISC_OFFSET + PINCTRL_REG_LEN *
-				(i - ctrl_pin - com_pin);
+				   sprd_pctl->soc_data->misc_pin_offset +
+				   PINCTRL_REG_LEN * (i - ctrl_pin - com_pin);
 		}
 	}
 
@@ -1033,9 +1183,10 @@ static int sprd_pinctrl_add_pins(struct sprd_pinctrl *sprd_pctl,
 	return 0;
 }
 
-int sprd_pinctrl_core_probe(struct platform_device *pdev,
-			    struct sprd_pins_info *sprd_soc_pin_info,
-			    int pins_cnt)
+int sprd_pinctrl_core_probe_with_data(
+	struct platform_device *pdev,
+	const struct sprd_pins_info *sprd_soc_pin_info, int pins_cnt,
+	const struct sprd_pinctrl_soc_data *soc_data)
 {
 	struct sprd_pinctrl *sprd_pctl;
 	struct sprd_pinctrl_soc_info *pinctrl_info;
@@ -1057,6 +1208,7 @@ int sprd_pinctrl_core_probe(struct platform_device *pdev,
 	if (!pinctrl_info)
 		return -ENOMEM;
 
+	sprd_pctl->soc_data = soc_data;
 	sprd_pctl->info = pinctrl_info;
 	sprd_pctl->dev = &pdev->dev;
 	platform_set_drvdata(pdev, sprd_pctl);
@@ -1099,6 +1251,15 @@ int sprd_pinctrl_core_probe(struct platform_device *pdev,
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(sprd_pinctrl_core_probe_with_data);
+
+int sprd_pinctrl_core_probe(struct platform_device *pdev,
+			    struct sprd_pins_info *sprd_soc_pin_info,
+			    int pins_cnt)
+{
+	return sprd_pinctrl_core_probe_with_data(
+		pdev, sprd_soc_pin_info, pins_cnt, &sprd_sc9860_soc_data);
+}
 EXPORT_SYMBOL_GPL(sprd_pinctrl_core_probe);
 
 void sprd_pinctrl_remove(struct platform_device *pdev)
@@ -1126,4 +1287,4 @@ EXPORT_SYMBOL_GPL(sprd_pinctrl_shutdown);
 
 MODULE_DESCRIPTION("SPREADTRUM Pin Controller Driver");
 MODULE_AUTHOR("Baolin Wang <baolin.wang@spreadtrum.com>");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");

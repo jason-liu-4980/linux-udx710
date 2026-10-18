@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/watchdog/sprd,sp9860-wdt.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Spreadtrum SP9860 watchdog timer
+title: Spreadtrum SP9860 and Orca watchdog timers
 
 maintainers:
   - Orson Zhai <orsonzhai@gmail.com>
@@ -16,7 +16,9 @@ allOf:
 
 properties:
   compatible:
-    const: sprd,sp9860-wdt
+    enum:
+      - sprd,orca-wdt
+      - sprd,sp9860-wdt
 
   reg:
     maxItems: 1

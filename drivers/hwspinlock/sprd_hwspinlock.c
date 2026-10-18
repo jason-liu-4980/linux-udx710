@@ -136,7 +136,12 @@ static int sprd_hwspinlock_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id sprd_hwspinlock_of_match[] = {
-	{ .compatible = "sprd,hwspinlock-r3p0", },
+	{
+		.compatible = "sprd,hwspinlock-r3p0",
+	},
+	{
+		.compatible = "sprd,orca-hwspinlock",
+	},
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, sprd_hwspinlock_of_match);
@@ -150,7 +155,7 @@ static struct platform_driver sprd_hwspinlock_driver = {
 };
 module_platform_driver(sprd_hwspinlock_driver);
 
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Hardware spinlock driver for Spreadtrum");
 MODULE_AUTHOR("Baolin Wang <baolin.wang@spreadtrum.com>");
 MODULE_AUTHOR("Lanqing Liu <lanqing.liu@spreadtrum.com>");

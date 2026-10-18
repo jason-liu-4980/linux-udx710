@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pci/sprd,orca-pcie.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Spreadtrum Orca PCIe root complex
+
+maintainers:
+  - Orson Zhai <orsonzhai@gmail.com>
+  - Baolin Wang <baolin.wang7@gmail.com>
+  - Chunyan Zhang <zhang.lyra@gmail.com>
+
+description: |
+  Orca integrates a DesignWare root complex and an application register
+  block in the DBI window. The transitional BSP sequence properties below
+  retain the exact board-provided PLL, sleep and PERST sequencing while
+  their ownership is converted to dedicated providers. They must not be
+  combined with another owner writing the same control bits.
+
+allOf:
+  - $ref: /schemas/pci/snps,dw-pcie.yaml#
+
+properties:
+  compatible:
+    const: sprd,orca-pcie
+
+  reg:
+    maxItems: 2
+
+  reg-names:
+    items:
+      - const: dbi
+      - const: config
+
+  num-lanes:
+    const: 1
+
+  num-vectors:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [32, 64, 96, 128, 160, 192, 224, 256]
+    description: Number of vectors in the integrated MSI receiver.
+
+  num-viewport:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Legacy BSP iATU window count; mainline detects the windows.
+    deprecated: true
+
+  interrupts:
+    maxItems: 1
+
+  interrupt-names:
+    const: msi
+
+  no-pcie:
+    type: boolean
+    description: Legacy board-disable flag; new boards should use status.
+    deprecated: true
+
+  dummy@0:
+    type: object
+    description: Legacy placement of the GIC MSI interrupt in the stock tree.
+    properties:
+      label:
+        const: msi_int
+      interrupt-parent: true
+      '#interrupt-cells':
+        const: 3
+      interrupts:
+        maxItems: 1
+    required:
+      - label
+      - interrupts
+    additionalProperties: false
+    deprecated: true
+
+patternProperties:
+  '^sprd,pcie-(startup|shutdown|suspend|resume|aspml1p2)-syscons$':
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    minItems: 1
+    maxItems: 64
+    items:
+      items:
+        - description: Syscon provider
+        - description: Operation, 0 masked update, 1 forced masked write, 2 poll
+          minimum: 0
+          maximum: 2
+        - description: Delay after this operation, in milliseconds
+          maximum: 10000
+        - description: Aligned byte offset inside the syscon resource
+          multipleOf: 4
+        - description: Nonzero register mask
+          minimum: 1
+        - description: Value restricted to the mask
+    description: Ordered BSP syscon operations; poll has a bounded timeout.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - num-lanes
+  - num-vectors
+  - sprd,pcie-startup-syscons
+  - sprd,pcie-shutdown-syscons
+  - sprd,pcie-suspend-syscons
+  - sprd,pcie-resume-syscons
+
+oneOf:
+  - required: [interrupts, interrupt-names]
+  - required: [dummy@0]
+
+unevaluatedProperties: false

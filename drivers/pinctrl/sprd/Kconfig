@@ -19,3 +19,14 @@ config PINCTRL_SPRD_SC9860
 	select PINCTRL_SPRD
 	help
 	  Say Y here to enable Spreadtrum SC9860 pinctrl driver
+
+config PINCTRL_SPRD_ORCA
+	tristate "Spreadtrum Orca pinctrl driver"
+	depends on OF
+	depends on ARCH_SPRD || COMPILE_TEST
+	select PINCTRL_SPRD
+	help
+	  Enable the pin controller on Spreadtrum Orca (UDX710).
+	  This provides global control fields, pin multiplexing and pad
+	  configuration, including hardware-controlled sleep states.
+	  If unsure, say N.

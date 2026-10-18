@@ -58,6 +58,7 @@ struct sprd_efuse_variant_data {
 	u32 blk_nums;
 	u32 blk_offset;
 	bool blk_double;
+	bool read_only;
 };
 
 struct sprd_efuse {
@@ -73,6 +74,14 @@ static const struct sprd_efuse_variant_data ums312_data = {
 	.blk_nums = SPRD_EFUSE_NORMAL_BLOCK_NUMS,
 	.blk_offset = SPRD_EFUSE_NORMAL_BLOCK_OFFSET,
 	.blk_double = false,
+};
+
+/* The Orca public aperture excludes secure blocks and is never programmable. */
+static const struct sprd_efuse_variant_data orca_data = {
+	.blk_nums = 45,
+	.blk_offset = 2,
+	.blk_double = true,
+	.read_only = true,
 };
 
 /*
@@ -279,9 +288,13 @@ static int sprd_efuse_raw_read(struct sprd_efuse *efuse, int blk, u32 *val,
 	 * errors occurred.
 	 */
 	status = readl(efuse->base + SPRD_EFUSE_ERR_FLAG);
+	/* The Orca read protocol clears status after every transaction. */
+	if (efuse->data->read_only)
+		writel(SPRD_EFUSE_ERR_CLR_MASK,
+		       efuse->base + SPRD_EFUSE_ERR_CLR);
 	if (status) {
-		dev_err(efuse->dev,
-			"read error status %d of block %d\n", status, blk);
+		dev_err_ratelimited(efuse->dev,
+				    "eFuse controller read error\n");
 
 		writel(SPRD_EFUSE_ERR_CLR_MASK,
 		       efuse->base + SPRD_EFUSE_ERR_CLR);
@@ -294,32 +307,113 @@ static int sprd_efuse_raw_read(struct sprd_efuse *efuse, int blk, u32 *val,
 static int sprd_efuse_read(void *context, u32 offset, void *val, size_t bytes)
 {
 	struct sprd_efuse *efuse = context;
-	bool blk_double = efuse->data->blk_double;
-	u32 index = offset / SPRD_EFUSE_BLOCK_WIDTH + efuse->data->blk_offset;
-	u32 blk_offset = (offset % SPRD_EFUSE_BLOCK_WIDTH) * BITS_PER_BYTE;
-	u32 data;
+	u32 size = efuse->data->blk_nums * SPRD_EFUSE_BLOCK_WIDTH;
+	u8 *out = val;
 	int ret;
 
+	if (offset > size || bytes > size - offset)
+		return -EINVAL;
+	if (!bytes)
+		return 0;
 	ret = sprd_efuse_lock(efuse);
 	if (ret)
 		return ret;
-
 	ret = clk_prepare_enable(efuse->clk);
 	if (ret)
 		goto unlock;
 
-	ret = sprd_efuse_raw_read(efuse, index, &data, blk_double);
-	if (!ret) {
-		data >>= blk_offset;
-		memcpy(val, &data, bytes);
+	/* NVMEM permits unaligned reads spanning more than one physical block. */
+	while (bytes) {
+		u32 skip = offset % SPRD_EFUSE_BLOCK_WIDTH;
+		u32 index = offset / SPRD_EFUSE_BLOCK_WIDTH +
+			    efuse->data->blk_offset;
+		size_t count =
+			min_t(size_t, bytes, SPRD_EFUSE_BLOCK_WIDTH - skip);
+		u32 data;
+		size_t i;
+
+		ret = sprd_efuse_raw_read(efuse, index, &data,
+					  efuse->data->blk_double);
+		if (ret)
+			break;
+		for (i = 0; i < count; i++)
+			out[i] = data >> ((skip + i) * BITS_PER_BYTE);
+		out += count;
+		offset += count;
+		bytes -= count;
 	}
-
 	clk_disable_unprepare(efuse->clk);
-
 unlock:
 	sprd_efuse_unlock(efuse);
 	return ret;
 }
+
+/* The board's original READ_UID handler reads physical blocks 0 and 1 in
+ * double mode, then clears bit 31 in each word. These two UID blocks precede
+ * the existing Orca calibration aperture; keep its offsets unchanged.
+ */
+static int sprd_efuse_read_uid(struct sprd_efuse *efuse, u8 uid[8])
+{
+	u32 words[2];
+	int ret, i;
+
+	ret = sprd_efuse_lock(efuse);
+	if (ret)
+		return ret;
+	ret = clk_prepare_enable(efuse->clk);
+	if (ret)
+		goto unlock;
+
+	writel(SPRD_EFUSE_ERR_CLR_MASK, efuse->base + SPRD_EFUSE_ERR_CLR);
+	for (i = 0; i < 2; i++) {
+		ret = sprd_efuse_raw_read(efuse, i, &words[i], true);
+		if (ret)
+			goto clock_off;
+		words[i] &= 0x7fffffff;
+	}
+	if ((!words[0] && !words[1]) ||
+	    (words[0] == 0x7fffffff && words[1] == 0x7fffffff)) {
+		ret = -ENODATA;
+		goto clock_off;
+	}
+	for (i = 0; i < 8; i++)
+		uid[i] = words[i / 4] >> ((i % 4) * 8);
+
+clock_off:
+	clk_disable_unprepare(efuse->clk);
+unlock:
+	sprd_efuse_unlock(efuse);
+	return ret;
+}
+
+static ssize_t soc_uid_read(struct file *file, struct kobject *kobj,
+			    const struct bin_attribute *attr, char *buf,
+			    loff_t offset, size_t count)
+{
+	struct sprd_efuse *efuse = dev_get_drvdata(kobj_to_dev(kobj));
+	u8 uid[8];
+	int ret;
+
+	if (offset < 0)
+		return -EINVAL;
+	if (offset >= sizeof(uid) || !count)
+		return 0;
+	ret = sprd_efuse_read_uid(efuse, uid);
+	if (ret)
+		return ret;
+	count = min_t(size_t, count, sizeof(uid) - offset);
+	memcpy(buf, uid + offset, count);
+	return count;
+}
+
+static const BIN_ATTR_ADMIN_RO(soc_uid, 8);
+static const struct bin_attribute *const sprd_efuse_uid_bin_attrs[] = {
+	&bin_attr_soc_uid,
+	NULL,
+};
+static const struct attribute_group sprd_efuse_uid_group = {
+	.bin_attrs = sprd_efuse_uid_bin_attrs,
+};
 
 static int sprd_efuse_write(void *context, u32 offset, void *val, size_t bytes)
 {
@@ -327,6 +421,9 @@ static int sprd_efuse_write(void *context, u32 offset, void *val, size_t bytes)
 	bool blk_double = efuse->data->blk_double;
 	bool lock;
 	int ret;
+
+	if (efuse->data->read_only)
+		return -EROFS;
 
 	ret = sprd_efuse_lock(efuse);
 	if (ret)
@@ -365,6 +462,7 @@ static int sprd_efuse_probe(struct platform_device *pdev)
 	struct nvmem_config econfig = { };
 	struct sprd_efuse *efuse;
 	const struct sprd_efuse_variant_data *pdata;
+	struct resource *res;
 	int ret;
 
 	pdata = of_device_get_match_data(&pdev->dev);
@@ -377,7 +475,13 @@ static int sprd_efuse_probe(struct platform_device *pdev)
 	if (!efuse)
 		return -ENOMEM;
 
-	efuse->base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res || resource_size(res) < SPRD_EFUSE_MEM(pdata->blk_offset +
+							pdata->blk_nums - 1) +
+						 sizeof(u32))
+		return dev_err_probe(&pdev->dev, -EINVAL,
+				     "eFuse register window too small\n");
+	efuse->base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(efuse->base))
 		return PTR_ERR(efuse->base);
 
@@ -405,12 +509,16 @@ static int sprd_efuse_probe(struct platform_device *pdev)
 
 	econfig.stride = 1;
 	econfig.word_size = 1;
-	econfig.read_only = false;
-	econfig.name = "sprd-efuse";
+	econfig.read_only = pdata->read_only;
+	econfig.root_only = pdata->read_only;
+	econfig.type = NVMEM_TYPE_OTP;
+	econfig.owner = THIS_MODULE;
+	econfig.name = pdata->read_only ? "orca-public-efuse" : "sprd-efuse";
 	econfig.size = efuse->data->blk_nums * SPRD_EFUSE_BLOCK_WIDTH;
 	econfig.add_legacy_fixed_of_cells = true;
 	econfig.reg_read = sprd_efuse_read;
-	econfig.reg_write = sprd_efuse_write;
+	if (!pdata->read_only)
+		econfig.reg_write = sprd_efuse_write;
 	econfig.priv = efuse;
 	econfig.dev = &pdev->dev;
 	nvmem = devm_nvmem_register(&pdev->dev, &econfig);
@@ -418,13 +526,17 @@ static int sprd_efuse_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "failed to register nvmem\n");
 		return PTR_ERR(nvmem);
 	}
+	platform_set_drvdata(pdev, efuse);
+	if (pdata == &orca_data)
+		return devm_device_add_group(&pdev->dev, &sprd_efuse_uid_group);
 
 	return 0;
 }
 
 static const struct of_device_id sprd_efuse_of_match[] = {
 	{ .compatible = "sprd,ums312-efuse", .data = &ums312_data },
-	{ }
+	{ .compatible = "sprd,orca-efuse", .data = &orca_data },
+	{}
 };
 MODULE_DEVICE_TABLE(of, sprd_efuse_of_match);
 
@@ -440,4 +552,4 @@ module_platform_driver(sprd_efuse_driver);
 
 MODULE_AUTHOR("Freeman Liu <freeman.liu@spreadtrum.com>");
 MODULE_DESCRIPTION("Spreadtrum AP efuse driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");

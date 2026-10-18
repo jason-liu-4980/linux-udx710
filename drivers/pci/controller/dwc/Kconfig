@@ -26,6 +26,31 @@ config PCIE_DW_EP
 	bool
 	select PCIE_DW
 
+config PCIE_SPRD_ORCA
+	bool "Spreadtrum Orca PCIe root complex"
+	depends on OF && (ARCH_SPRD || COMPILE_TEST)
+	depends on PCI_MSI
+	select PCIE_DW_HOST
+	select MFD_SYSCON
+	help
+	  Orca DesignWare root complex with the documented BSP syscon
+	  startup, shutdown, suspend and resume sequences.
+
+config SPRD_PCIE_EP_DEVICE
+	bool "Spreadtrum Orca AP-side endpoint client"
+	depends on PCIE_SPRD_ORCA
+	help
+	  Map endpoint BAR apertures, software MSI 16/17 and doorbells for
+	  the GPL BSP endpoint contract. This does not create a SIPA resource.
+
+config SPRD_IPA_PCIE_WORKROUND
+	bool "Orca endpoint hardware IPA BAR/MSI profile"
+	depends on SPRD_PCIE_EP_DEVICE
+	help
+	  Reserve BAR0/1 for IPA and divert MSI indices 0..3 from the AP
+	  receiver while retaining their allocation. Select only when the
+	  endpoint and IPA profile are independently confirmed to use this ABI.
+
 config PCIE_AL
 	bool "Amazon Annapurna Labs PCIe controller"
 	depends on OF && (ARM64 || COMPILE_TEST)

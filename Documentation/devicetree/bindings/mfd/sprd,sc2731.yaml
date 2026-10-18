@@ -59,6 +59,10 @@ properties:
       - $ref: /schemas/regulator/sprd,sc2731-regulator.yaml#
 
 patternProperties:
+  "^poweroff@1820$":
+    type: object
+    $ref: /schemas/power/reset/sprd,sc2730-poweroff.yaml#
+
   "^adc@[0-9a-f]+$":
     type: object
     $ref: /schemas/iio/adc/sprd,sc2720-adc.yaml#

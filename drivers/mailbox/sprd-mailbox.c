@@ -14,6 +14,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
+#include <linux/wait.h>
 
 #define SPRD_MBOX_ID		0x0
 #define SPRD_MBOX_MSG_LOW	0x4
@@ -74,6 +75,8 @@ enum sprd_mbox_version {
 struct sprd_mbox_info {
 	enum sprd_mbox_version version;
 	unsigned long supp_id;
+	unsigned int num_chans;
+	bool flush_unsupported;
 };
 
 struct sprd_mbox_priv {
@@ -89,12 +92,49 @@ struct sprd_mbox_priv {
 
 	struct mutex		lock;
 	u32			refcnt;
+	int inbox_irq;
+	int outbox_irq;
+	int supp_irq;
+	spinlock_t dispatch_lock;
+	spinlock_t tx_lock;
+	bool online[SPRD_MBOX_R2_CHAN_MAX];
+	unsigned int callbacks[SPRD_MBOX_R2_CHAN_MAX];
+	wait_queue_head_t callbacks_idle;
 	struct mbox_chan	chan[SPRD_MBOX_R2_CHAN_MAX];
 };
 
 static struct sprd_mbox_priv *to_sprd_mbox_priv(struct mbox_controller *mbox)
 {
 	return container_of(mbox, struct sprd_mbox_priv, mbox);
+}
+
+/* No provider lock is held across client callbacks: a client may send or
+ * flush another message from atomic context. shutdown closes this gate and
+ * waits for the acquired references before mailbox core clears chan->cl.
+ */
+static bool sprd_mbox_callback_get(struct sprd_mbox_priv *priv, unsigned int id)
+{
+	unsigned long flags;
+	bool online;
+
+	if (id >= priv->mbox.num_chans)
+		return false;
+	spin_lock_irqsave(&priv->dispatch_lock, flags);
+	online = priv->online[id];
+	if (online)
+		priv->callbacks[id]++;
+	spin_unlock_irqrestore(&priv->dispatch_lock, flags);
+	return online;
+}
+
+static void sprd_mbox_callback_put(struct sprd_mbox_priv *priv, unsigned int id)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&priv->dispatch_lock, flags);
+	if (--priv->callbacks[id] == 0)
+		wake_up_all(&priv->callbacks_idle);
+	spin_unlock_irqrestore(&priv->dispatch_lock, flags);
 }
 
 static u32 sprd_mbox_get_fifo_len(struct sprd_mbox_priv *priv, u32 fifo_sts)
@@ -142,10 +182,14 @@ static irqreturn_t do_outbox_isr(void __iomem *base, struct sprd_mbox_priv *priv
 		msg[1] = readl(base + SPRD_MBOX_MSG_HIGH);
 		id = readl(base + SPRD_MBOX_ID);
 
-		chan = &priv->chan[id];
-		if (chan->cl)
+		/* shutdown makes a channel offline before synchronizing IRQs.
+		 * Never retain or dereference a client after that boundary.
+		 */
+		if (sprd_mbox_callback_get(priv, id)) {
+			chan = &priv->chan[id];
 			mbox_chan_received_data(chan, (void *)msg);
-		else
+			sprd_mbox_callback_put(priv, id);
+		} else
 			dev_warn_ratelimited(priv->dev,
 				    "message's been dropped at ch[%d]\n", id);
 
@@ -210,6 +254,8 @@ static irqreturn_t sprd_mbox_inbox_isr(int irq, void *data)
 		id = __ffs(send_sts);
 		send_sts &= (send_sts - 1);
 
+		if (id >= priv->mbox.num_chans)
+			continue;
 		chan = &priv->chan[id];
 
 		/*
@@ -221,8 +267,10 @@ static irqreturn_t sprd_mbox_inbox_isr(int irq, void *data)
 		else
 			busy = fifo_sts & SPRD_INBOX_FIFO_BUSY_MASK;
 
-		if (!(busy & BIT(id)))
+		if (!(busy & BIT(id)) && sprd_mbox_callback_get(priv, id)) {
 			mbox_chan_txdone(chan, 0);
+			sprd_mbox_callback_put(priv, id);
+		}
 	}
 
 	/* Clear irq status */
@@ -236,7 +284,10 @@ static int sprd_mbox_send_data(struct mbox_chan *chan, void *msg)
 	struct sprd_mbox_priv *priv = to_sprd_mbox_priv(chan->mbox);
 	unsigned long id = (unsigned long)chan->con_priv;
 	u32 *data = msg;
+	unsigned long flags;
 
+	/* All channels share these four inbox registers. */
+	spin_lock_irqsave(&priv->tx_lock, flags);
 	/* Write data into inbox FIFO, and only support 8 bytes every time */
 	writel(data[0], priv->inbox_base + SPRD_MBOX_MSG_LOW);
 	writel(data[1], priv->inbox_base + SPRD_MBOX_MSG_HIGH);
@@ -246,6 +297,7 @@ static int sprd_mbox_send_data(struct mbox_chan *chan, void *msg)
 
 	/* Trigger remote request */
 	writel(0x1, priv->inbox_base + SPRD_MBOX_TRIGGER);
+	spin_unlock_irqrestore(&priv->tx_lock, flags);
 
 	return 0;
 }
@@ -256,13 +308,25 @@ static int sprd_mbox_flush(struct mbox_chan *chan, unsigned long timeout)
 	unsigned long id = (unsigned long)chan->con_priv;
 	u32 busy;
 
+	/* Orca has no validated polling completion contract yet. */
+	if (priv->info->flush_unsupported)
+		return -EOPNOTSUPP;
+
 	timeout = jiffies + msecs_to_jiffies(timeout);
 
 	while (time_before(jiffies, timeout)) {
-		busy = readl(priv->inbox_base + SPRD_MBOX_FIFO_STS) &
-			SPRD_INBOX_FIFO_BUSY_MASK;
+		if (priv->info->version == SPRD_MBOX_R2)
+			busy = readl(priv->inbox_base +
+				     SPRD_MBOX_IN_FIFO_STS2) &
+			       SPRD_INBOX_R2_FIFO_BUSY_MASK;
+		else
+			busy = readl(priv->inbox_base + SPRD_MBOX_FIFO_STS) &
+			       SPRD_INBOX_FIFO_BUSY_MASK;
 		if (!(busy & BIT(id))) {
+			if (!sprd_mbox_callback_get(priv, id))
+				return -ESHUTDOWN;
 			mbox_chan_txdone(chan, 0);
+			sprd_mbox_callback_put(priv, id);
 			return 0;
 		}
 
@@ -275,9 +339,14 @@ static int sprd_mbox_flush(struct mbox_chan *chan, unsigned long timeout)
 static int sprd_mbox_startup(struct mbox_chan *chan)
 {
 	struct sprd_mbox_priv *priv = to_sprd_mbox_priv(chan->mbox);
+	unsigned long id = (unsigned long)chan->con_priv;
+	unsigned long flags;
 	u32 val;
 
 	mutex_lock(&priv->lock);
+	spin_lock_irqsave(&priv->dispatch_lock, flags);
+	priv->online[id] = true;
+	spin_unlock_irqrestore(&priv->dispatch_lock, flags);
 	if (priv->refcnt++ == 0) {
 		/* Select outbox FIFO mode and reset the outbox FIFO status */
 		writel(0x0, priv->outbox_base + SPRD_MBOX_FIFO_RST);
@@ -306,8 +375,13 @@ static int sprd_mbox_startup(struct mbox_chan *chan)
 static void sprd_mbox_shutdown(struct mbox_chan *chan)
 {
 	struct sprd_mbox_priv *priv = to_sprd_mbox_priv(chan->mbox);
+	unsigned long id = (unsigned long)chan->con_priv;
+	unsigned long flags;
 
 	mutex_lock(&priv->lock);
+	spin_lock_irqsave(&priv->dispatch_lock, flags);
+	priv->online[id] = false;
+	spin_unlock_irqrestore(&priv->dispatch_lock, flags);
 	if (--priv->refcnt == 0) {
 		/* Disable inbox & outbox interrupt */
 		writel(SPRD_INBOX_FIFO_IRQ_MASK, priv->inbox_base + SPRD_MBOX_IRQ_MSK);
@@ -318,6 +392,19 @@ static void sprd_mbox_shutdown(struct mbox_chan *chan)
 			       priv->supp_base + SPRD_MBOX_IRQ_MSK);
 	}
 	mutex_unlock(&priv->lock);
+
+	/* Other channels can keep shared IRQs enabled. Per-channel gating
+	 * stops new callbacks; synchronize drains callbacks that saw online.
+	 * Core clears chan->cl only after this function returns.
+	 */
+	wait_event(priv->callbacks_idle, !READ_ONCE(priv->callbacks[id]));
+	/* Include callback_put's final wake/unlock for non-IRQ flush callers. */
+	spin_lock_irqsave(&priv->dispatch_lock, flags);
+	spin_unlock_irqrestore(&priv->dispatch_lock, flags);
+	synchronize_irq(priv->inbox_irq);
+	synchronize_irq(priv->outbox_irq);
+	if (priv->supp_irq > 0)
+		synchronize_irq(priv->supp_irq);
 }
 
 static const struct mbox_chan_ops sprd_mbox_ops = {
@@ -341,6 +428,9 @@ static int sprd_mbox_probe(struct platform_device *pdev)
 
 	priv->dev = dev;
 	mutex_init(&priv->lock);
+	spin_lock_init(&priv->dispatch_lock);
+	spin_lock_init(&priv->tx_lock);
+	init_waitqueue_head(&priv->callbacks_idle);
 
 	priv->info = of_device_get_match_data(dev);
 	if (!priv->info)
@@ -371,6 +461,31 @@ static int sprd_mbox_probe(struct platform_device *pdev)
 		return PTR_ERR(clk);
 	}
 
+	/* Get the default outbox FIFO depth */
+	priv->outbox_fifo_depth =
+		readl(priv->outbox_base + SPRD_MBOX_FIFO_DEPTH) + 1;
+	if (!priv->outbox_fifo_depth || priv->outbox_fifo_depth > 256)
+		return -EINVAL;
+	priv->mbox.dev = dev;
+	priv->mbox.chans = &priv->chan[0];
+	priv->mbox.ops = &sprd_mbox_ops;
+	priv->mbox.txdone_irq = true;
+
+	if (priv->info->num_chans)
+		priv->mbox.num_chans = priv->info->num_chans;
+	else if (priv->info->version == SPRD_MBOX_R2)
+		priv->mbox.num_chans = SPRD_MBOX_R2_CHAN_MAX;
+	else
+		priv->mbox.num_chans = SPRD_MBOX_R1_CHAN_MAX;
+
+	for (id = 0; id < priv->mbox.num_chans; id++)
+		priv->chan[id].con_priv = (void *)id;
+
+	/* Keep interrupt sources masked until channel startup. */
+	writel(SPRD_INBOX_FIFO_IRQ_MASK, priv->inbox_base + SPRD_MBOX_IRQ_MSK);
+	writel(SPRD_OUTBOX_FIFO_IRQ_MASK,
+	       priv->outbox_base + SPRD_MBOX_IRQ_MSK);
+
 	inbox_irq = platform_get_irq_byname(pdev, "inbox");
 	if (inbox_irq < 0)
 		return inbox_irq;
@@ -390,12 +505,10 @@ static int sprd_mbox_probe(struct platform_device *pdev)
 		return ret;
 
 	/* Supplementary outbox IRQ is optional */
-	supp_irq = platform_get_irq_byname(pdev, "supp-outbox");
+	supp_irq = platform_get_irq_byname_optional(pdev, "supp-outbox");
+	if (supp_irq == -EPROBE_DEFER)
+		return supp_irq;
 	if (supp_irq > 0) {
-		ret = devm_request_irq(dev, supp_irq, sprd_mbox_supp_isr,
-				       IRQF_NO_SUSPEND, dev_name(dev), priv);
-		if (ret)
-			return ret;
 
 		if (!priv->info->supp_id) {
 			dev_err(dev, "no supplementary outbox specified\n");
@@ -403,23 +516,15 @@ static int sprd_mbox_probe(struct platform_device *pdev)
 		}
 		priv->supp_base = priv->outbox_base +
 			(SPRD_OUTBOX_BASE_SPAN * priv->info->supp_id);
+		ret = devm_request_irq(dev, supp_irq, sprd_mbox_supp_isr,
+				       IRQF_NO_SUSPEND, dev_name(dev), priv);
+		if (ret)
+			return ret;
 	}
 
-	/* Get the default outbox FIFO depth */
-	priv->outbox_fifo_depth =
-		readl(priv->outbox_base + SPRD_MBOX_FIFO_DEPTH) + 1;
-	priv->mbox.dev = dev;
-	priv->mbox.chans = &priv->chan[0];
-	priv->mbox.ops = &sprd_mbox_ops;
-	priv->mbox.txdone_irq = true;
-
-	if (priv->info->version == SPRD_MBOX_R2)
-		priv->mbox.num_chans = SPRD_MBOX_R2_CHAN_MAX;
-	else
-		priv->mbox.num_chans = SPRD_MBOX_R1_CHAN_MAX;
-
-	for (id = 0; id < priv->mbox.num_chans; id++)
-		priv->chan[id].con_priv = (void *)id;
+	priv->inbox_irq = inbox_irq;
+	priv->outbox_irq = outbox_irq;
+	priv->supp_irq = supp_irq;
 
 	ret = devm_mbox_controller_register(dev, &priv->mbox);
 	if (ret) {
@@ -444,11 +549,19 @@ static const struct sprd_mbox_info ums9230_mbox_info = {
 	.supp_id = 6,
 };
 
+/* Orca BSP R2 register layout; observed hardware routes core IDs 0..8. */
+static const struct sprd_mbox_info orca_mbox_info = {
+	.version = SPRD_MBOX_R2,
+	.num_chans = 9,
+	.flush_unsupported = true,
+};
+
 static const struct of_device_id sprd_mbox_of_match[] = {
+	{ .compatible = "sprd,orca-mailbox", .data = &orca_mbox_info },
 	{ .compatible = "sprd,sc9860-mailbox", .data = &sc9860_mbox_info },
 	{ .compatible = "sprd,sc9863a-mailbox", .data = &sc9863a_mbox_info },
 	{ .compatible = "sprd,ums9230-mailbox", .data = &ums9230_mbox_info },
-	{ },
+	{},
 };
 MODULE_DEVICE_TABLE(of, sprd_mbox_of_match);
 
@@ -463,4 +576,4 @@ module_platform_driver(sprd_mbox_driver);
 
 MODULE_AUTHOR("Baolin Wang <baolin.wang@unisoc.com>");
 MODULE_DESCRIPTION("Spreadtrum mailbox driver");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");

@@ -62,8 +62,11 @@ static const struct mfd_cell sc2730_devices[] = {
 	MFD_CELL_OF("sc2730-eic", NULL, NULL, 0, 0, "sprd,sc2730-eic"),
 	MFD_CELL_OF("sc2730-fgu", NULL, NULL, 0, 0, "sprd,sc2730-fgu"),
 	MFD_CELL_NAME("sc2730-regulator"),
+	MFD_CELL_OF("sc2730-poweroff", NULL, NULL, 0, 0,
+		    "sprd,sc2730-poweroff"),
 	MFD_CELL_OF("sc2730-rtc", NULL, NULL, 0, 0, "sprd,sc2730-rtc"),
-	MFD_CELL_OF("sc2730-vibrator", NULL, NULL, 0, 0, "sprd,sc2730-vibrator"),
+	MFD_CELL_OF("sc2730-vibrator", NULL, NULL, 0, 0,
+		    "sprd,sc2730-vibrator"),
 };
 
 static const struct mfd_cell sc2731_devices[] = {
@@ -247,6 +250,13 @@ static int sprd_pmic_probe(struct spi_device *spi)
 		return ret;
 	}
 
+	/* ADI/SPI transactions are owned by the controller. The PMIC and its
+	 * register-only MFD children are not DMA masters; initialize the mask
+	 * inherited by those platform devices before their DMA configuration.
+	 */
+	spi->dev.coherent_dma_mask = 0;
+	spi->dev.dma_mask = &spi->dev.coherent_dma_mask;
+
 	ret = devm_mfd_add_devices(&spi->dev, PLATFORM_DEVID_AUTO,
 				   cells, num_cells, NULL, 0,
 				   regmap_irq_get_domain(ddata->irq_data));
@@ -321,6 +331,6 @@ static void __exit sprd_pmic_exit(void)
 }
 module_exit(sprd_pmic_exit);
 
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Spreadtrum SC27xx PMICs driver");
 MODULE_AUTHOR("Baolin Wang <baolin.wang@spreadtrum.com>");

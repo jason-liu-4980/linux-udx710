@@ -270,8 +270,9 @@ static int sprd_dma_enable(struct sprd_dma_dev *sdev)
 	 * The ashb_clk is optional and only for AGCP DMA controller, so we
 	 * need add one condition to check if the ashb_clk need enable.
 	 */
-	if (!IS_ERR(sdev->ashb_clk))
-		ret = clk_prepare_enable(sdev->ashb_clk);
+	ret = clk_prepare_enable(sdev->ashb_clk);
+	if (ret)
+		clk_disable_unprepare(sdev->clk);
 
 	return ret;
 }
@@ -283,8 +284,7 @@ static void sprd_dma_disable(struct sprd_dma_dev *sdev)
 	/*
 	 * Need to check if we need disable the optional ashb_clk for AGCP DMA.
 	 */
-	if (!IS_ERR(sdev->ashb_clk))
-		clk_disable_unprepare(sdev->ashb_clk);
+	clk_disable_unprepare(sdev->ashb_clk);
 }
 
 static void sprd_dma_set_uid(struct sprd_dma_chn *schan)
@@ -1103,6 +1103,10 @@ static bool sprd_dma_filter_fn(struct dma_chan *chan, void *param)
 	struct sprd_dma_chn *schan = to_sprd_dma_chan(chan);
 	u32 slave_id = *(u32 *)param;
 
+	/* Two 32-bit pending-enable registers represent request IDs 1..64. */
+	if (slave_id > 64)
+		return false;
+
 	schan->dev_id = slave_id;
 	return true;
 }
@@ -1112,6 +1116,7 @@ static int sprd_dma_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	struct sprd_dma_dev *sdev;
 	struct sprd_dma_chn *dma_chn;
+	struct resource *res;
 	u32 chn_count;
 	int ret, i;
 
@@ -1134,6 +1139,13 @@ static int sprd_dma_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	if (!chn_count || chn_count > 32)
+		return dev_err_probe(&pdev->dev, -EINVAL,
+				     "invalid DMA channel count\n");
+	if (of_device_is_compatible(np, "sprd,orca-dma") && chn_count != 28)
+		return dev_err_probe(&pdev->dev, -EINVAL,
+				     "Orca AP DMA requires 28 channels\n");
+
 	sdev = devm_kzalloc(&pdev->dev,
 			    struct_size(sdev, channels, chn_count),
 			    GFP_KERNEL);
@@ -1147,9 +1159,18 @@ static int sprd_dma_probe(struct platform_device *pdev)
 	}
 
 	/* ashb clock is optional for AGCP DMA */
-	sdev->ashb_clk = devm_clk_get(&pdev->dev, "ashb_eb");
+	sdev->ashb_clk = devm_clk_get_optional(&pdev->dev, "ashb_eb");
 	if (IS_ERR(sdev->ashb_clk))
-		dev_warn(&pdev->dev, "no optional ashb eb clock\n");
+		return dev_err_probe(&pdev->dev, PTR_ERR(sdev->ashb_clk),
+				     "cannot get optional ashb clock\n");
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res || resource_size(res) < SPRD_DMA_GLB_REQ_UID_OFFSET + 64 * 4)
+		return dev_err_probe(&pdev->dev, -EINVAL,
+				     "DMA register window too small\n");
+	sdev->glb_base = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(sdev->glb_base))
+		return PTR_ERR(sdev->glb_base);
 
 	/*
 	 * We have three DMA controllers: AP DMA, AON DMA and AGCP DMA. For AGCP
@@ -1158,7 +1179,12 @@ static int sprd_dma_probe(struct platform_device *pdev)
 	 * does not request the irq. Thus the DMA interrupts property should
 	 * be optional.
 	 */
-	sdev->irq = platform_get_irq(pdev, 0);
+	sdev->irq = platform_get_irq_optional(pdev, 0);
+	if (sdev->irq == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
+	if (of_device_is_compatible(np, "sprd,orca-dma") && sdev->irq <= 0)
+		return dev_err_probe(&pdev->dev, sdev->irq ?: -EINVAL,
+				     "Orca AP DMA requires an interrupt\n");
 	if (sdev->irq > 0) {
 		ret = devm_request_irq(&pdev->dev, sdev->irq, dma_irq_handle,
 				       0, "sprd_dma", (void *)sdev);
@@ -1169,10 +1195,6 @@ static int sprd_dma_probe(struct platform_device *pdev)
 	} else {
 		dev_warn(&pdev->dev, "no interrupts for the dma controller\n");
 	}
-
-	sdev->glb_base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(sdev->glb_base))
-		return PTR_ERR(sdev->glb_base);
 
 	dma_cap_set(DMA_MEMCPY, sdev->dma_dev.cap_mask);
 	sdev->total_chns = chn_count;
@@ -1249,14 +1271,19 @@ static void sprd_dma_remove(struct platform_device *pdev)
 	if (sdev->irq > 0)
 		devm_free_irq(&pdev->dev, sdev->irq, sdev);
 
+	of_dma_controller_free(pdev->dev.of_node);
+	/*
+	 * The DMA core walks this list to remove channel devices and release
+	 * their IDs. Keep it intact until unregister has finished.
+	 */
+	dma_async_device_unregister(&sdev->dma_dev);
+
 	list_for_each_entry_safe(c, cn, &sdev->dma_dev.channels,
 				 vc.chan.device_node) {
 		list_del(&c->vc.chan.device_node);
 		tasklet_kill(&c->vc.task);
 	}
 
-	of_dma_controller_free(pdev->dev.of_node);
-	dma_async_device_unregister(&sdev->dma_dev);
 	sprd_dma_disable(sdev);
 
 	pm_runtime_put_noidle(&pdev->dev);
@@ -1264,7 +1291,15 @@ static void sprd_dma_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id sprd_dma_match[] = {
-	{ .compatible = "sprd,sc9860-dma", },
+	{
+		.compatible = "sprd,sc9860-dma",
+	},
+	{
+		.compatible = "sprd,orca-dma",
+	},
+	{
+		.compatible = "sprd,roc1-dma",
+	},
 	{},
 };
 MODULE_DEVICE_TABLE(of, sprd_dma_match);
@@ -1306,7 +1341,7 @@ static struct platform_driver sprd_dma_driver = {
 };
 module_platform_driver(sprd_dma_driver);
 
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DMA driver for Spreadtrum");
 MODULE_AUTHOR("Baolin Wang <baolin.wang@spreadtrum.com>");
 MODULE_AUTHOR("Eric Long <eric.long@spreadtrum.com>");

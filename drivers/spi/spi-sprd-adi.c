@@ -8,6 +8,7 @@
 #include <linux/hwspinlock.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/irqflags.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -68,6 +69,8 @@
 
 /* Timeout (ms) for the trylock of hardware spinlocks */
 #define ADI_HWSPINLOCK_TIMEOUT		5000
+/* IRQ-off restart cannot use the jiffies-based timeout. */
+#define ADI_HWSPINLOCK_ATOMIC_TIMEOUT 5
 /*
  * ADI controller has 50 channels including 2 software channels
  * and 48 hardware channels.
@@ -137,8 +140,10 @@ struct sprd_adi_wdg {
 struct sprd_adi_data {
 	u32 slave_offset;
 	u32 slave_addr_size;
+	bool read_cmd_phys;
 	int (*read_check)(u32 val, u32 reg);
 	int (*restart)(struct sys_off_data *data);
+	int restart_priority;
 	void (*wdg_rst)(void *p);
 };
 
@@ -218,13 +223,17 @@ static int sprd_adi_read(struct sprd_adi *sadi, u32 reg, u32 *read_val)
 {
 	int read_timeout = ADI_READ_TIMEOUT;
 	unsigned long flags;
+	bool irq_off = irqs_disabled();
 	u32 val;
 	int ret = 0;
 
 	if (sadi->hwlock) {
-		ret = hwspin_lock_timeout_irqsave(sadi->hwlock,
-						  ADI_HWSPINLOCK_TIMEOUT,
-						  &flags);
+		if (irq_off)
+			ret = hwspin_lock_timeout_in_atomic(
+				sadi->hwlock, ADI_HWSPINLOCK_ATOMIC_TIMEOUT);
+		else
+			ret = hwspin_lock_timeout_irqsave(
+				sadi->hwlock, ADI_HWSPINLOCK_TIMEOUT, &flags);
 		if (ret) {
 			dev_err(sadi->dev, "get the hw lock failed\n");
 			return ret;
@@ -239,7 +248,9 @@ static int sprd_adi_read(struct sprd_adi *sadi, u32 reg, u32 *read_val)
 	 * Set the slave address offset need to read into RD_CMD register,
 	 * then ADI controller will start to transfer automatically.
 	 */
-	writel_relaxed(reg, sadi->base + REG_ADI_RD_CMD);
+	writel_relaxed(sadi->data->read_cmd_phys ? sadi->slave_pbase + reg :
+						   reg,
+		       sadi->base + REG_ADI_RD_CMD);
 
 	/*
 	 * Wait read operation complete, the BIT_RD_CMD_BUSY will be set
@@ -268,7 +279,10 @@ static int sprd_adi_read(struct sprd_adi *sadi, u32 reg, u32 *read_val)
 	 * address to validate data.
 	 */
 	if (sadi->data->read_check) {
-		ret = sadi->data->read_check(val, reg);
+		ret = sadi->data->read_check(val,
+					     sadi->data->read_cmd_phys ?
+						     sadi->slave_pbase + reg :
+						     reg);
 		if (ret < 0)
 			goto out;
 	}
@@ -276,8 +290,12 @@ static int sprd_adi_read(struct sprd_adi *sadi, u32 reg, u32 *read_val)
 	*read_val = val & RD_VALUE_MASK;
 
 out:
-	if (sadi->hwlock)
-		hwspin_unlock_irqrestore(sadi->hwlock, &flags);
+	if (sadi->hwlock) {
+		if (irq_off)
+			hwspin_unlock_in_atomic(sadi->hwlock);
+		else
+			hwspin_unlock_irqrestore(sadi->hwlock, &flags);
+	}
 	return ret;
 }
 
@@ -285,12 +303,16 @@ static int sprd_adi_write(struct sprd_adi *sadi, u32 reg, u32 val)
 {
 	u32 timeout = ADI_FIFO_DRAIN_TIMEOUT;
 	unsigned long flags;
+	bool irq_off = irqs_disabled();
 	int ret;
 
 	if (sadi->hwlock) {
-		ret = hwspin_lock_timeout_irqsave(sadi->hwlock,
-						  ADI_HWSPINLOCK_TIMEOUT,
-						  &flags);
+		if (irq_off)
+			ret = hwspin_lock_timeout_in_atomic(
+				sadi->hwlock, ADI_HWSPINLOCK_ATOMIC_TIMEOUT);
+		else
+			ret = hwspin_lock_timeout_irqsave(
+				sadi->hwlock, ADI_HWSPINLOCK_TIMEOUT, &flags);
 		if (ret) {
 			dev_err(sadi->dev, "get the hw lock failed\n");
 			return ret;
@@ -325,8 +347,12 @@ static int sprd_adi_write(struct sprd_adi *sadi, u32 reg, u32 val)
 	}
 
 out:
-	if (sadi->hwlock)
-		hwspin_unlock_irqrestore(sadi->hwlock, &flags);
+	if (sadi->hwlock) {
+		if (irq_off)
+			hwspin_unlock_in_atomic(sadi->hwlock);
+		else
+			hwspin_unlock_irqrestore(sadi->hwlock, &flags);
+	}
 	return ret;
 }
 
@@ -456,6 +482,105 @@ static int sprd_adi_restart_sc9860(struct sys_off_data *data)
 	return sprd_adi_restart(data->cb_data, data->mode, data->cmd, &wdg);
 }
 
+/* SC2730 Orca sequence is not the SC9860 watchdog layout or timeout. */
+static int sprd_adi_orca_update(struct sprd_adi *sadi, u32 reg, u32 clear,
+				u32 set)
+{
+	u32 val;
+	int ret = sprd_adi_read(sadi, reg, &val);
+
+	if (ret)
+		return ret;
+	return sprd_adi_write(sadi, reg, (val & ~clear) | set);
+}
+
+static int sprd_adi_restart_orca(struct sys_off_data *data)
+{
+	struct sprd_adi *sadi = data->cb_data;
+	struct device_node *pmic;
+	const char *cmd = data->cmd;
+	u32 reboot_mode = 0;
+	int ret;
+
+	pmic = of_get_compatible_child(sadi->dev->of_node, "sprd,sc2730");
+	if (!pmic)
+		return NOTIFY_DONE;
+	of_node_put(pmic);
+	if (!cmd)
+		reboot_mode = HWRST_STATUS_NORMAL;
+	else if (!strncmp(cmd, "recovery", 8))
+		reboot_mode = HWRST_STATUS_RECOVERY;
+	else if (!strncmp(cmd, "alarm", 5))
+		reboot_mode = HWRST_STATUS_ALARM;
+	else if (!strncmp(cmd, "fastsleep", 9))
+		reboot_mode = HWRST_STATUS_SLEEP;
+	else if (!strncmp(cmd, "bootloader", 10))
+		reboot_mode = HWRST_STATUS_FASTBOOT;
+	else if (!strncmp(cmd, "panic", 5))
+		reboot_mode = HWRST_STATUS_PANIC;
+	else if (!strncmp(cmd, "special", 7))
+		reboot_mode = HWRST_STATUS_SPECIAL;
+	else if (!strncmp(cmd, "cftreboot", 9))
+		reboot_mode = HWRST_STATUS_CFTREBOOT;
+	else if (!strncmp(cmd, "autodloader", 11))
+		reboot_mode = HWRST_STATUS_AUTODLOADER;
+	else if (!strncmp(cmd, "iqmode", 6))
+		reboot_mode = HWRST_STATUS_IQMODE;
+	else if (!strncmp(cmd, "sprdisk", 7))
+		reboot_mode = HWRST_STATUS_SPRDISK;
+	else if (!strncmp(cmd, "tospanic", 8))
+		reboot_mode = HWRST_STATUS_SECURITY;
+	else if (!strncmp(cmd, "factorytest", 11))
+		reboot_mode = HWRST_STATUS_FACTORYTEST;
+	else
+		reboot_mode = HWRST_STATUS_NORMAL;
+
+	ret = sprd_adi_orca_update(sadi, 0x1bac, HWRST_STATUS_WATCHDOG,
+				   reboot_mode);
+	if (ret)
+		goto failed;
+	ret = sprd_adi_orca_update(sadi, 0x1808, 0, BIT_WDG_EN);
+	if (ret)
+		goto failed;
+	ret = sprd_adi_orca_update(sadi, 0x1810, 0, BIT_WDG_EN);
+	if (ret)
+		goto failed;
+	ret = sprd_adi_write(sadi, 0x40 + REG_WDG_LOCK, WDG_UNLOCK_KEY);
+	if (ret)
+		goto failed;
+	ret = sprd_adi_orca_update(sadi, 0x40 + REG_WDG_CTRL, 0, BIT_WDG_NEW);
+	if (ret)
+		goto relock;
+	/*
+	 * Preserve the BSP literal result (50*1000)/32768 == 1. It has NOT been
+	 * validated as 50ms. Stock Orca machine code writes HIGH before LOW.
+	 */
+	ret = sprd_adi_write(sadi, 0x40 + REG_WDG_LOAD_HIGH, 0);
+	if (ret)
+		goto relock;
+	ret = sprd_adi_write(sadi, 0x40 + REG_WDG_LOAD_LOW, 1);
+	if (ret)
+		goto relock;
+	ret = sprd_adi_orca_update(sadi, 0x40 + REG_WDG_CTRL, 0,
+				   BIT_WDG_RUN | BIT_WDG_RST);
+relock:
+	{
+		int lock_ret = sprd_adi_write(sadi, 0x40 + REG_WDG_LOCK,
+					      ~WDG_UNLOCK_KEY);
+		if (!ret)
+			ret = lock_ret;
+	}
+	if (ret)
+		goto failed;
+	mdelay(1000);
+	dev_emerg(sadi->dev, "SC2730 restart request returned without reset\n");
+	return NOTIFY_DONE;
+failed:
+	dev_emerg(sadi->dev, "SC2730 restart register operation failed: %d\n",
+		  ret);
+	return NOTIFY_DONE;
+}
+
 static void sprd_adi_hw_init(struct sprd_adi *sadi)
 {
 	struct device_node *np = sadi->dev->of_node;
@@ -539,6 +664,13 @@ static int sprd_adi_probe(struct platform_device *pdev)
 	if (IS_ERR(sadi->base))
 		return PTR_ERR(sadi->base);
 
+	if (data->read_cmd_phys &&
+	    (resource_size(res) < data->slave_offset + data->slave_addr_size ||
+	     res->start + data->slave_offset >
+		     U32_MAX - (data->slave_addr_size - 1)))
+		return dev_err_probe(&pdev->dev, -EINVAL,
+				     "invalid ADI slave window\n");
+
 	sadi->slave_vbase = (unsigned long)sadi->base +
 			    data->slave_offset;
 	sadi->slave_pbase = res->start + data->slave_offset;
@@ -583,9 +715,10 @@ static int sprd_adi_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret, "failed to register SPI controller\n");
 
 	if (sadi->data->restart) {
-		ret = devm_register_restart_handler(&pdev->dev,
-						    sadi->data->restart,
-						    sadi);
+		ret = devm_register_sys_off_handler(
+			&pdev->dev, SYS_OFF_MODE_RESTART,
+			sadi->data->restart_priority, sadi->data->restart,
+			sadi);
 		if (ret)
 			return dev_err_probe(&pdev->dev, ret, "can not register restart handler\n");
 	}
@@ -613,7 +746,30 @@ static struct sprd_adi_data ums512_data = {
 	.read_check = sprd_adi_read_check_r3,
 };
 
+/*
+ * Stock Orca DT selects SharkL5. Preserve its BSP 8 KiB public window and
+ * physical-address read command, not the wider UMS512 data or SC9860 reset.
+ */
+static const struct sprd_adi_data sharkl5_data = {
+	.slave_offset = ADI_15BIT_SLAVE_OFFSET,
+	.slave_addr_size = SZ_8K,
+	.read_cmd_phys = true,
+	.read_check = sprd_adi_read_check_r3,
+};
+
+static const struct sprd_adi_data orca_data = {
+	.slave_offset = ADI_15BIT_SLAVE_OFFSET,
+	.slave_addr_size = SZ_8K,
+	.read_cmd_phys = true,
+	.read_check = sprd_adi_read_check_r3,
+	.restart = sprd_adi_restart_orca,
+	/* Orca uses SC2730 before the generic PSCI restart handler (129). */
+	.restart_priority = SYS_OFF_PRIO_HIGH,
+};
+
 static const struct of_device_id sprd_adi_of_match[] = {
+	{ .compatible = "sprd,sharkl5-adi", .data = &sharkl5_data },
+	{ .compatible = "sprd,orca-adi", .data = &orca_data },
 	{
 		.compatible = "sprd,sc9860-adi",
 		.data = &sc9860_data,
@@ -626,7 +782,7 @@ static const struct of_device_id sprd_adi_of_match[] = {
 		.compatible = "sprd,ums512-adi",
 		.data = &ums512_data,
 	},
-	{ },
+	{},
 };
 MODULE_DEVICE_TABLE(of, sprd_adi_of_match);
 
@@ -641,4 +797,4 @@ module_platform_driver(sprd_adi_driver);
 
 MODULE_DESCRIPTION("Spreadtrum ADI Controller Driver");
 MODULE_AUTHOR("Baolin Wang <Baolin.Wang@spreadtrum.com>");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");

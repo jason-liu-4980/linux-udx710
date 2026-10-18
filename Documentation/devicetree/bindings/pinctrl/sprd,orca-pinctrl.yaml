@@ -1,0 +1,562 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pinctrl/sprd,orca-pinctrl.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Spreadtrum Orca (UDX710) Pin Controller
+
+maintainers:
+  - Bruce Chen <bruce.chen@unisoc.com>
+
+description: |
+  Orca exposes global control fields, 174 common pad registers starting at
+  offset 0x30, and 174 miscellaneous pad registers starting at offset 0x430.
+  The common and miscellaneous registers are spaced four bytes apart.
+  Global control fields retain the names and field layout of the vendor BSP.
+
+  Register layouts and pull resistor encodings differ from SC9860, so an
+  SC9860 fallback compatible is not valid. The controller has no interrupt
+  or GPIO-provider interface in this binding.
+
+  Sleep-domain bits 0 through 3 select AP, PUBCP, TGLDSP and AGDSP, matching
+  the implemented Orca BSP behavior. Further domains need hardware evidence.
+  Hardware-controlled sleep states do not imply that Linux controls CP or
+  DSP firmware or their power state.
+
+  In sleep-hardware-state nodes, output-enable and output-disable control
+  the sleep output buffer. The legacy BSP output-high and output-low both
+  enabled that buffer without selecting a signal level; use output-enable
+  when translating those legacy properties. Do not infer output voltage or
+  logic level from this operation.
+
+properties:
+  compatible:
+    const: sprd,orca-pinctrl
+
+  reg:
+    maxItems: 1
+
+patternProperties:
+  '^[a-z][a-z0-9-]*-pins$':
+    $ref: '#/$defs/pin-node'
+    unevaluatedProperties: false
+
+    properties:
+      input-enable: false
+      input-disable: false
+      output-enable: false
+      output-disable: false
+      bias-high-impedance: false
+      output-high: false
+      output-low: false
+
+      function:
+        enum: [func1, func2, func3, func4]
+
+      drive-strength:
+        enum: [2, 4, 6, 8, 10, 12, 14, 16, 20, 21, 24, 25, 27, 29, 31, 33]
+
+      input-schmitt-enable: true
+      input-schmitt-disable: true
+
+      bias-pull-up:
+        enum: [20000, 4700]
+
+      sprd,sleep-mode:
+        description: Mask of the four sleep domains documented above.
+        $ref: /schemas/types.yaml#/definitions/uint32
+        maximum: 15
+
+      sprd,control:
+        description: Value of a named global register bit field.
+        $ref: /schemas/types.yaml#/definitions/uint32
+
+    patternProperties:
+      '^[a-z][a-z0-9-]*-sleep$':
+        $ref: '#/$defs/pin-node'
+        unevaluatedProperties: false
+
+        properties:
+          sleep-hardware-state:
+            const: true
+          bias-pull-up:
+            type: boolean
+          output-high: false
+          output-low: false
+          output-enable: true
+          output-disable: true
+          bias-high-impedance: true
+
+        required:
+          - sleep-hardware-state
+
+$defs:
+  pin-node:
+    type: object
+    allOf:
+      - $ref: /schemas/pinctrl/pincfg-node.yaml#
+      - $ref: /schemas/pinctrl/pinmux-node.yaml#
+
+    properties:
+      pins:
+        description: Named global fields or common and miscellaneous pads.
+        minItems: 1
+        maxItems: 416
+        items:
+          enum:
+            - ORCA_UART_INF6_SYS_SEL
+            - ORCA_UART_INF5_SYS_SEL
+            - ORCA_UART_INF4_SYS_SEL
+            - ORCA_UART_INF3_SYS_SEL
+            - ORCA_UART_INF2_INF3_LOOP
+            - ORCA_UART_INF2_INF4_LOOP
+            - ORCA_UART_INF2_SYS_SEL
+            - ORCA_UART_INF1_INF4_LOOP
+            - ORCA_UART_INF1_INF3_LOOP
+            - ORCA_UART_INF1_SYS_SEL
+            - ORCA_UART_INF0_SYS_SEL
+            - ORCA_IIS_INF4_INF3_LOOP
+            - ORCA_IIS_INF4_SYS_SEL
+            - ORCA_IIS_INF3_SYS_SEL
+            - ORCA_IIS_INF2_SYS_SEL
+            - ORCA_IIS_INF1_INF2_LOOP
+            - ORCA_IIS_INF1_SYS_SEL
+            - ORCA_IIS_INF0_INF2_LOOP
+            - ORCA_IIS_INF0_INF1_LOOP
+            - ORCA_IIS_INF0_SYS_SEL
+            - ORCA_SIM_INF2_SYS_SEL
+            - ORCA_SIM_INF1_SYS_SEL
+            - ORCA_SIM_INFO_SYS_SEL
+            - ORCA_SPI_INF3_SYS_SEL
+            - ORCA_SPI_INF2_SYS_SEL
+            - ORCA_SPI_INF1_SYS_SEL
+            - ORCA_SPI_INF0_SYS_SEL
+            - ORCA_IIC_INF4_SYS_SEL
+            - ORCA_IIC_INF3_SYS_SEL
+            - ORCA_IIC_INF2_SYS_SEL
+            - ORCA_IIC_INF1_SYS_SEL
+            - ORCA_IIC_INF0_SYS_SEL
+            - ORCA_SIM2_SYS_DLB_MODE
+            - ORCA_SIM1_SYS_DLB_MODE
+            - ORCA_SIM0_SYS_DLB_MODE
+            - ORCA_WDRST_OUT_SEL
+            - ORCA_SIMRST2_ISO_VALUE
+            - ORCA_SIMDA2_ISO_VALUE
+            - ORCA_SIMCLK2_ISO_VALUE
+            - ORCA_SIMRST1_ISO_VALUE
+            - ORCA_SIMDA1_ISO_VALUE
+            - ORCA_SIMCLK1_ISO_VALUE
+            - ORCA_SIMRST0_ISO_VALUE
+            - ORCA_SIMDA0_ISO_VALUE
+            - ORCA_SIMCLK0_ISO_VALUE
+            - ORCA_UART_USB_PHY_SEL
+            - ORCA_USB_PHY_DM_OE
+            - ORCA_USB_PHY_DP_OE
+            - ORCA_SP_EIC_DPAD3
+            - ORCA_SP_EIC_DPAD2
+            - ORCA_SP_EIC_DPAD1
+            - ORCA_SP_EIC_DPAD0
+            - ORCA_SP_EIC_DPAD7
+            - ORCA_SP_EIC_DPAD6
+            - ORCA_SP_EIC_DPAD5
+            - ORCA_SP_EIC_DPAD4
+            - ORCA_SD_DET_SEL
+            - ORCA_SIM1_DET_SEL
+            - ORCA_SIM0_DET_SEL
+            - ORCA_V3PS_SDOPBD_EB
+            - ORCA_V3PS_SIM1_BD_EB
+            - ORCA_V3PS_SIM0_BD_EB
+            - ORCA_AP_SIM0_BD_EB
+            - ORCA_AP_EMMC_BD_EB
+            - ORCA_AP_SDIO1_BD_EB
+            - ORCA_PSCP_SDIO_BD_EB
+            - ORCA_PSCP_SIM1_BD_EB
+            - ORCA_PSCP_SIM0_BD_EB
+            - ORCA_SPI0_CSN
+            - ORCA_SPI0_DO
+            - ORCA_SPI0_DI
+            - ORCA_SPI0_CLK
+            - ORCA_SPI2_CSN
+            - ORCA_SPI2_DO
+            - ORCA_SPI2_DI
+            - ORCA_SPI2_CLK
+            - ORCA_EMMC_RST
+            - ORCA_EMMC_CMD
+            - ORCA_EMMC_D0
+            - ORCA_EMMC_D3
+            - ORCA_EMMC_D2
+            - ORCA_EMMC_D5
+            - ORCA_EMMC_CLK
+            - ORCA_EMMC_DS
+            - ORCA_EMMC_D1
+            - ORCA_EMMC_D4
+            - ORCA_EMMC_D6
+            - ORCA_EMMC_D7
+            - ORCA_PCIE_CLKREQ
+            - ORCA_PCIE_RST
+            - ORCA_PCIE_WAKE
+            - ORCA_SD0_D3
+            - ORCA_SD0_D2
+            - ORCA_SD0_CMD
+            - ORCA_SD0_D0
+            - ORCA_SD0_D1
+            - ORCA_SD0_CLK
+            - ORCA_SD0_D4
+            - ORCA_SD0_DS
+            - ORCA_SD0_D5
+            - ORCA_SD0_D6
+            - ORCA_SD0_D7
+            - ORCA_RFSCK0_NR
+            - ORCA_RFSDA0_NR
+            - ORCA_RFSEN0_NR
+            - ORCA_RFSDA2_NR
+            - ORCA_RFSDA1_NR
+            - ORCA_RFSDA3_NR
+            - ORCA_RFCTL_NR0
+            - ORCA_RFCTL_NR1
+            - ORCA_RFCTL_NR2
+            - ORCA_RFCTL_NR3
+            - ORCA_RFCTL_NR4
+            - ORCA_RFCTL_NR5
+            - ORCA_RFCTL_NR6
+            - ORCA_RFCTL_NR7
+            - ORCA_RFCTL_NR8
+            - ORCA_RFCTL_NR9
+            - ORCA_RFCTL_NR10
+            - ORCA_RFCTL_NR11
+            - ORCA_RFCTL_NR12
+            - ORCA_RFCTL_NR13
+            - ORCA_RFCTL_NR14
+            - ORCA_RFCTL_NR15
+            - ORCA_RFFE2_SCK_NR
+            - ORCA_RFFE2_SDA_NR
+            - ORCA_RFFE3_SCK_NR
+            - ORCA_RFFE3_SDA_NR
+            - ORCA_RF_LVDS_ADDAC0_ON
+            - ORCA_RF_LVDS_ADDAC1_ON
+            - ORCA_RF_LVDS_ADDAC2_ON
+            - ORCA_RF_NR_LVDS_ADDAC0_ON
+            - ORCA_RF_NR_LVDS_ADDAC1_ON
+            - ORCA_RF_NR_LVDS_ADDAC2_ON
+            - ORCA_RFCTL0
+            - ORCA_RFCTL1
+            - ORCA_RFCTL2
+            - ORCA_RFCTL3
+            - ORCA_RFCTL4
+            - ORCA_RFCTL5
+            - ORCA_RFCTL6
+            - ORCA_RFCTL7
+            - ORCA_RFCTL8
+            - ORCA_RFCTL9
+            - ORCA_RFCTL10
+            - ORCA_RFCTL11
+            - ORCA_RFCTL12
+            - ORCA_RFCTL13
+            - ORCA_RFCTL14
+            - ORCA_RFCTL15
+            - ORCA_RFSCK0
+            - ORCA_RFSDA0
+            - ORCA_RFSEN0
+            - ORCA_RFSDA2
+            - ORCA_RFSDA1
+            - ORCA_RFSDA3
+            - ORCA_RFFE0_SCK
+            - ORCA_RFFE0_SDA
+            - ORCA_RFFE1_SCK
+            - ORCA_RFFE1_SDA
+            - ORCA_IIS0DI
+            - ORCA_IIS0DO
+            - ORCA_IIS0CLK
+            - ORCA_IIS0LRCK
+            - ORCA_SCL0
+            - ORCA_SDA0
+            - ORCA_SDA1
+            - ORCA_SCL1
+            - ORCA_SCL2
+            - ORCA_SDA2
+            - ORCA_KEYOUT0
+            - ORCA_KEYOUT1
+            - ORCA_KEYOUT2
+            - ORCA_KEYIN0
+            - ORCA_KEYIN1
+            - ORCA_KEYIN2
+            - ORCA_DTDO
+            - ORCA_DTDI
+            - ORCA_DTMS
+            - ORCA_DTCK
+            - ORCA_DRTCK
+            - ORCA_MTCK_ARM
+            - ORCA_MTMS_ARM
+            - ORCA_DTDO_1
+            - ORCA_DTDI_1
+            - ORCA_DTMS_1
+            - ORCA_DTCK_1
+            - ORCA_DRTCK_1
+            - ORCA_U1TXD
+            - ORCA_U1RXD
+            - ORCA_U2TXD
+            - ORCA_U2RXD
+            - ORCA_U5TXD
+            - ORCA_U5RXD
+            - ORCA_U0TXD
+            - ORCA_U0RXD
+            - ORCA_U0CTS
+            - ORCA_U0RTS
+            - ORCA_U4TXD
+            - ORCA_U4RXD
+            - ORCA_U3TXD
+            - ORCA_U3RXD
+            - ORCA_PTEST
+            - ORCA_EXT_RST_B
+            - ORCA_ADI_SCLK
+            - ORCA_CLK_32K
+            - ORCA_ANA_INT
+            - ORCA_ADI_D
+            - ORCA_AUD_SCLK
+            - ORCA_XTL_EN_BB
+            - ORCA_XTL_EN_CM4
+            - ORCA_DCDC_ARM0_EN
+            - ORCA_AUD_ADD0
+            - ORCA_XTL_EN_V3
+            - ORCA_AUD_ADSYNC
+            - ORCA_AUD_DAD0
+            - ORCA_XTL_EN_NR
+            - ORCA_AUD_DASYNC
+            - ORCA_AUD_DAD1
+            - ORCA_CHIP_SLEEP
+            - ORCA_CLK_AUX0
+            - ORCA_SD1_CLK
+            - ORCA_SD1_CMD
+            - ORCA_SD1_D0
+            - ORCA_SD1_D1
+            - ORCA_SD1_D2
+            - ORCA_SD1_D3
+            - ORCA_SD2_CMD
+            - ORCA_SD2_D0
+            - ORCA_SD2_D1
+            - ORCA_SD2_CLK
+            - ORCA_SD2_D2
+            - ORCA_SD2_D3
+            - ORCA_SIMCLK0
+            - ORCA_SIMDA0
+            - ORCA_SIMRST0
+            - ORCA_SIMCLK1
+            - ORCA_SIMDA1
+            - ORCA_SIMRST1
+            - ORCA_SIMCLK2
+            - ORCA_SIMDA2
+            - ORCA_SIMRST2
+            - ORCA_SPI0_CSN_MISC
+            - ORCA_SPI0_DO_MISC
+            - ORCA_SPI0_DI_MISC
+            - ORCA_SPI0_CLK_MISC
+            - ORCA_SPI2_CSN_MISC
+            - ORCA_SPI2_DO_MISC
+            - ORCA_SPI2_DI_MISC
+            - ORCA_SPI2_CLK_MISC
+            - ORCA_EMMC_RST_MISC
+            - ORCA_EMMC_CMD_MISC
+            - ORCA_EMMC_D0_MISC
+            - ORCA_EMMC_D3_MISC
+            - ORCA_EMMC_D2_MISC
+            - ORCA_EMMC_D5_MISC
+            - ORCA_EMMC_CLK_MISC
+            - ORCA_EMMC_DS_MISC
+            - ORCA_EMMC_D1_MISC
+            - ORCA_EMMC_D4_MISC
+            - ORCA_EMMC_D6_MISC
+            - ORCA_EMMC_D7_MISC
+            - ORCA_PCIE_CLKREQ_MISC
+            - ORCA_PCIE_RST_MISC
+            - ORCA_PCIE_WAKE_MISC
+            - ORCA_SD0_D3_MISC
+            - ORCA_SD0_D2_MISC
+            - ORCA_SD0_CMD_MISC
+            - ORCA_SD0_D0_MISC
+            - ORCA_SD0_D1_MISC
+            - ORCA_SD0_CLK_MISC
+            - ORCA_SD0_D4_MISC
+            - ORCA_SD0_DS_MISC
+            - ORCA_SD0_D5_MISC
+            - ORCA_SD0_D6_MISC
+            - ORCA_SD0_D7_MISC
+            - ORCA_RFSCK0_NR_MISC
+            - ORCA_RFSDA0_NR_MISC
+            - ORCA_RFSEN0_NR_MISC
+            - ORCA_RFSDA2_NR_MISC
+            - ORCA_RFSDA1_NR_MISC
+            - ORCA_RFSDA3_NR_MISC
+            - ORCA_RFCTL_NR0_MISC
+            - ORCA_RFCTL_NR1_MISC
+            - ORCA_RFCTL_NR2_MISC
+            - ORCA_RFCTL_NR3_MISC
+            - ORCA_RFCTL_NR4_MISC
+            - ORCA_RFCTL_NR5_MISC
+            - ORCA_RFCTL_NR6_MISC
+            - ORCA_RFCTL_NR7_MISC
+            - ORCA_RFCTL_NR8_MISC
+            - ORCA_RFCTL_NR9_MISC
+            - ORCA_RFCTL_NR10_MISC
+            - ORCA_RFCTL_NR11_MISC
+            - ORCA_RFCTL_NR12_MISC
+            - ORCA_RFCTL_NR13_MISC
+            - ORCA_RFCTL_NR14_MISC
+            - ORCA_RFCTL_NR15_MISC
+            - ORCA_RFFE2_SCK_NR_MISC
+            - ORCA_RFFE2_SDA_NR_MISC
+            - ORCA_RFFE3_SCK_NR_MISC
+            - ORCA_RFFE3_SDA_NR_MISC
+            - ORCA_RF_LVDS_ADDAC0_ON_MISC
+            - ORCA_RF_LVDS_ADDAC1_ON_MISC
+            - ORCA_RF_LVDS_ADDAC2_ON_MISC
+            - ORCA_RF_NR_LVDS_ADDAC0_ON_MISC
+            - ORCA_RF_NR_LVDS_ADDAC1_ON_MISC
+            - ORCA_RF_NR_LVDS_ADDAC2_ON_MISC
+            - ORCA_RFCTL0_MISC
+            - ORCA_RFCTL1_MISC
+            - ORCA_RFCTL2_MISC
+            - ORCA_RFCTL3_MISC
+            - ORCA_RFCTL4_MISC
+            - ORCA_RFCTL5_MISC
+            - ORCA_RFCTL6_MISC
+            - ORCA_RFCTL7_MISC
+            - ORCA_RFCTL8_MISC
+            - ORCA_RFCTL9_MISC
+            - ORCA_RFCTL10_MISC
+            - ORCA_RFCTL11_MISC
+            - ORCA_RFCTL12_MISC
+            - ORCA_RFCTL13_MISC
+            - ORCA_RFCTL14_MISC
+            - ORCA_RFCTL15_MISC
+            - ORCA_RFSCK0_MISC
+            - ORCA_RFSDA0_MISC
+            - ORCA_RFSEN0_MISC
+            - ORCA_RFSDA2_MISC
+            - ORCA_RFSDA1_MISC
+            - ORCA_RFSDA3_MISC
+            - ORCA_RFFE0_SCK_MISC
+            - ORCA_RFFE0_SDA_MISC
+            - ORCA_RFFE1_SCK_MISC
+            - ORCA_RFFE1_SDA_MISC
+            - ORCA_IIS0DI_MISC
+            - ORCA_IIS0DO_MISC
+            - ORCA_IIS0CLK_MISC
+            - ORCA_IIS0LRCK_MISC
+            - ORCA_SCL0_MISC
+            - ORCA_SDA0_MISC
+            - ORCA_SDA1_MISC
+            - ORCA_SCL1_MISC
+            - ORCA_SCL2_MISC
+            - ORCA_SDA2_MISC
+            - ORCA_KEYOUT0_MISC
+            - ORCA_KEYOUT1_MISC
+            - ORCA_KEYOUT2_MISC
+            - ORCA_KEYIN0_MISC
+            - ORCA_KEYIN1_MISC
+            - ORCA_KEYIN2_MISC
+            - ORCA_DTDO_MISC
+            - ORCA_DTDI_MISC
+            - ORCA_DTMS_MISC
+            - ORCA_DTCK_MISC
+            - ORCA_DRTCK_MISC
+            - ORCA_MTCK_ARM_MISC
+            - ORCA_MTMS_ARM_MISC
+            - ORCA_DTDO_1_MISC
+            - ORCA_DTDI_1_MISC
+            - ORCA_DTMS_1_MISC
+            - ORCA_DTCK_1_MISC
+            - ORCA_DRTCK_1_MISC
+            - ORCA_U1TXD_MISC
+            - ORCA_U1RXD_MISC
+            - ORCA_U2TXD_MISC
+            - ORCA_U2RXD_MISC
+            - ORCA_U5TXD_MISC
+            - ORCA_U5RXD_MISC
+            - ORCA_U0TXD_MISC
+            - ORCA_U0RXD_MISC
+            - ORCA_U0CTS_MISC
+            - ORCA_U0RTS_MISC
+            - ORCA_U4TXD_MISC
+            - ORCA_U4RXD_MISC
+            - ORCA_U3TXD_MISC
+            - ORCA_U3RXD_MISC
+            - ORCA_PTEST_MISC
+            - ORCA_EXT_RST_B_MISC
+            - ORCA_ADI_SCLK_MISC
+            - ORCA_CLK_32K_MISC
+            - ORCA_ANA_INT_MISC
+            - ORCA_ADI_D_MISC
+            - ORCA_AUD_SCLK_MISC
+            - ORCA_XTL_EN_BB_MISC
+            - ORCA_XTL_EN_CM4_MISC
+            - ORCA_DCDC_ARM0_EN_MISC
+            - ORCA_AUD_ADD0_MISC
+            - ORCA_XTL_EN_V3_MISC
+            - ORCA_AUD_ADSYNC_MISC
+            - ORCA_AUD_DAD0_MISC
+            - ORCA_XTL_EN_NR_MISC
+            - ORCA_AUD_DASYNC_MISC
+            - ORCA_AUD_DAD1_MISC
+            - ORCA_CHIP_SLEEP_MISC
+            - ORCA_CLK_AUX0_MISC
+            - ORCA_SD1_CLK_MISC
+            - ORCA_SD1_CMD_MISC
+            - ORCA_SD1_D0_MISC
+            - ORCA_SD1_D1_MISC
+            - ORCA_SD1_D2_MISC
+            - ORCA_SD1_D3_MISC
+            - ORCA_SD2_CMD_MISC
+            - ORCA_SD2_D0_MISC
+            - ORCA_SD2_D1_MISC
+            - ORCA_SD2_CLK_MISC
+            - ORCA_SD2_D2_MISC
+            - ORCA_SD2_D3_MISC
+            - ORCA_SIMCLK0_MISC
+            - ORCA_SIMDA0_MISC
+            - ORCA_SIMRST0_MISC
+            - ORCA_SIMCLK1_MISC
+            - ORCA_SIMDA1_MISC
+            - ORCA_SIMRST1_MISC
+            - ORCA_SIMCLK2_MISC
+            - ORCA_SIMDA2_MISC
+            - ORCA_SIMRST2_MISC
+
+      bias-disable: true
+      bias-pull-down: true
+      input-enable: true
+      input-disable: true
+
+    required:
+      - pins
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    pinctrl@63450000 {
+        compatible = "sprd,orca-pinctrl";
+        reg = <0x63450000 0x10000>;
+
+        spi0-pins {
+            pins = "ORCA_SPI0_CLK", "ORCA_SPI0_DO";
+            function = "func1";
+            sprd,sleep-mode = <1>;
+
+            spi0-sleep {
+                pins = "ORCA_SPI0_CLK", "ORCA_SPI0_DO";
+                sleep-hardware-state;
+                output-enable;
+            };
+        };
+
+        spi0-pad-pins {
+            pins = "ORCA_SPI0_CLK_MISC", "ORCA_SPI0_DO_MISC";
+            drive-strength = <10>;
+            bias-pull-up = <20000>;
+        };
+    };

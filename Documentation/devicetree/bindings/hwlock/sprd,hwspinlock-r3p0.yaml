@@ -13,7 +13,9 @@ maintainers:
 
 properties:
   compatible:
-    const: sprd,hwspinlock-r3p0
+    enum:
+      - sprd,hwspinlock-r3p0
+      - sprd,orca-hwspinlock
 
   reg:
     maxItems: 1

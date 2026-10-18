@@ -47,10 +47,16 @@ allOf:
 
 properties:
   compatible:
-    enum:
-      - sprd,sc9860-adi
-      - sprd,sc9863-adi
-      - sprd,ums512-adi
+    oneOf:
+      - enum:
+          - sprd,sc9860-adi
+          - sprd,sc9863-adi
+          - sprd,ums512-adi
+          - sprd,sharkl5-adi
+          - sprd,orca-adi
+      - items:
+          - const: sprd,sharkl5-adi
+          - const: sprd,orca-adi
 
   reg:
     maxItems: 1

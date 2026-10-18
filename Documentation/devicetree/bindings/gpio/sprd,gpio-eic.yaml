@@ -49,6 +49,30 @@ properties:
           - sprd,sc9860-eic-async
           - sprd,sc9860-eic-sync
           - sprd,sc2731-eic
+      - enum:
+          - sprd,orca-eic-debounce
+          - sprd,sharkl5-eic-debounce
+      - items:
+          - const: sprd,orca-eic-debounce
+          - const: sprd,sharkl5-eic-debounce
+      - enum:
+          - sprd,orca-eic-latch
+          - sprd,sharkl5-eic-latch
+      - items:
+          - const: sprd,orca-eic-latch
+          - const: sprd,sharkl5-eic-latch
+      - enum:
+          - sprd,orca-eic-async
+          - sprd,sharkl5-eic-async
+      - items:
+          - const: sprd,orca-eic-async
+          - const: sprd,sharkl5-eic-async
+      - enum:
+          - sprd,orca-eic-sync
+          - sprd,sharkl5-eic-sync
+      - items:
+          - const: sprd,orca-eic-sync
+          - const: sprd,sharkl5-eic-sync
       - items:
           - enum:
               - sprd,ums512-eic-debounce
@@ -72,9 +96,9 @@ properties:
 
   reg:
     minItems: 1
-    maxItems: 3
+    maxItems: 4
     description:
-      EIC controller can support maximum 3 banks which has its own
+      EIC controller can support maximum 4 banks which has its own
       address base.
 
   gpio-controller: true
@@ -100,6 +124,30 @@ required:
   - interrupt-controller
   - "#interrupt-cells"
   - interrupts
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - sprd,orca-eic-debounce
+              - sprd,orca-eic-latch
+              - sprd,orca-eic-async
+              - sprd,orca-eic-sync
+              - sprd,sharkl5-eic-debounce
+              - sprd,sharkl5-eic-latch
+              - sprd,sharkl5-eic-async
+              - sprd,sharkl5-eic-sync
+    then:
+      properties:
+        reg:
+          minItems: 4
+          maxItems: 4
+    else:
+      properties:
+        reg:
+          maxItems: 3
 
 additionalProperties: false
 

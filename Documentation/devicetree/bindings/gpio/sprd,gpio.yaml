@@ -21,6 +21,11 @@ properties:
   compatible:
     oneOf:
       - const: sprd,sc9860-gpio
+      - const: sprd,sharkl5-gpio
+      - const: sprd,orca-gpio
+      - items:
+          - const: sprd,orca-gpio
+          - const: sprd,sharkl5-gpio
       - items:
           - enum:
               - sprd,ums512-gpio

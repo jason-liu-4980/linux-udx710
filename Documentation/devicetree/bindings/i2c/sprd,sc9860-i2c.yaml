@@ -16,7 +16,9 @@ allOf:
 
 properties:
   compatible:
-    const: sprd,sc9860-i2c
+    enum:
+      - sprd,sc9860-i2c
+      - sprd,orca-i2c
 
   reg:
     maxItems: 1
@@ -25,16 +27,19 @@ properties:
     maxItems: 1
 
   clocks:
-    items:
-      - description: I2C clock
-      - description: I2C source (parent) clock
-      - description: I2C module enable clock
+    minItems: 3
+    maxItems: 3
 
   clock-names:
-    items:
-      - const: i2c
-      - const: source
-      - const: enable
+    oneOf:
+      - items:
+          - const: i2c
+          - const: source
+          - const: enable
+      - items:
+          - const: enable
+          - const: i2c
+          - const: source
 
   clock-frequency: true
 
