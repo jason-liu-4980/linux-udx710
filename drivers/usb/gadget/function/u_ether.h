@@ -37,6 +37,12 @@
 	MODULE_PARM_DESC(host_addr, "Host Ethernet Address")
 
 struct eth_dev;
+struct gether;
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+int gether_pamu3_connect(struct gether *link);
+void gether_pamu3_disconnect(struct gether *link);
+void gether_pamu3_carrier(struct gether *link, bool on);
+#endif
 
 /*
  * This represents the USB side of an "ethernet" link, managed by a USB

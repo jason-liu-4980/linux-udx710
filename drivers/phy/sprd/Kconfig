@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config PHY_SPRD_ORCA_USB
+	bool "Spreadtrum Orca USB PHY"
+	depends on OF && (ARCH_SPRD || COMPILE_TEST)
+	depends on REGULATOR && RESET_CONTROLLER
+	select GENERIC_PHY
+	select MFD_SYSCON
+	help
+	  Enable the USB2/USB3 analog PHY driver for Spreadtrum Orca (UDX710)
+	  USB0 and USB1 controllers.

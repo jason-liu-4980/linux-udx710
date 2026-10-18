@@ -52,6 +52,7 @@ struct f_rndis_opts {
 	u8				class;
 	u8				subclass;
 	u8				protocol;
+	u8 pamu3;
 	struct mutex			lock;
 	int				refcnt;
 };

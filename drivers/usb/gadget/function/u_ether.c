@@ -22,7 +22,9 @@
 #include <linux/usb/composite.h>
 
 #include "u_ether.h"
-
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+#include <linux/sipa.h>
+#endif
 
 /*
  * This component encapsulates the Ethernet link glue needed to provide
@@ -59,6 +61,12 @@ struct eth_dev {
 	spinlock_t		lock;
 	struct gether		*port_usb;
 
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	bool pamu3;
+	int pamu3_nic;
+	struct napi_struct pamu3_napi;
+	struct delayed_work pamu3_tx_retry;
+#endif
 	struct net_device	*net;
 	struct usb_gadget	*gadget;
 
@@ -454,6 +462,163 @@ static int ether_wakeup_host(struct gether *port)
 	return ret;
 }
 
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+/* SIPA closes and fences its RCU callback before this NAPI is deleted. */
+static int gether_pamu3_poll(struct napi_struct *napi, int budget)
+{
+	struct eth_dev *dev = container_of(napi, struct eth_dev, pamu3_napi);
+	struct sk_buff *skb;
+	int done = 0;
+
+	while (done < budget && READ_ONCE(dev->pamu3)) {
+		if (sipa_nic_rx(dev->pamu3_nic, &skb) || !skb)
+			break;
+		done++;
+		if (!netif_running(dev->net) || !pskb_may_pull(skb, ETH_HLEN)) {
+			dev_kfree_skb_any(skb);
+			dev->net->stats.rx_dropped++;
+			continue;
+		}
+		dev->net->stats.rx_packets++;
+		dev->net->stats.rx_bytes += skb->len;
+		skb->protocol = eth_type_trans(skb, dev->net);
+		skb->ip_summed = CHECKSUM_NONE;
+		napi_gro_receive(napi, skb);
+	}
+	/* napi_schedule records MISSED if RX arrives during completion. */
+	if (done < budget)
+		napi_complete_done(napi, done);
+	return done;
+}
+
+static void gether_pamu3_notify(void *priv, enum sipa_evt_type evt,
+				unsigned long data)
+{
+	struct eth_dev *dev = priv;
+
+	if (!READ_ONCE(dev->pamu3))
+		return;
+	if (evt == SIPA_RECEIVE)
+		napi_schedule(&dev->pamu3_napi);
+	else if (evt == SIPA_LEAVE_FLOWCTRL && netif_running(dev->net) &&
+		 netif_carrier_ok(dev->net))
+		netif_wake_queue(dev->net);
+}
+
+/* One-shot retry closes a grant-notification/stop-queue race. Unlike RX,
+ * TX resource acquisition can return EINPROGRESS before the queue is stopped.
+ */
+static void gether_pamu3_tx_retry(struct work_struct *work)
+{
+	struct eth_dev *dev = container_of(to_delayed_work(work),
+					   struct eth_dev, pamu3_tx_retry);
+
+	if (READ_ONCE(dev->pamu3) && netif_running(dev->net) &&
+	    netif_carrier_ok(dev->net))
+		netif_wake_queue(dev->net);
+}
+
+static netdev_tx_t gether_pamu3_xmit(struct eth_dev *dev, struct sk_buff *skb)
+{
+	unsigned int len = skb->len;
+	int ret;
+
+	ret = sipa_nic_tx(dev->pamu3_nic, SIPA_TERM_USB, -1, skb);
+	if (ret == -EAGAIN || ret == -EINPROGRESS) {
+		netif_stop_queue(dev->net);
+		schedule_delayed_work(&dev->pamu3_tx_retry,
+				      msecs_to_jiffies(1));
+		return NETDEV_TX_BUSY; /* SIPA did not take this skb. */
+	}
+	if (ret) {
+		dev->net->stats.tx_errors++;
+		dev_kfree_skb_any(skb);
+	} else {
+		dev->net->stats.tx_packets++;
+		dev->net->stats.tx_bytes += len;
+	}
+	return NETDEV_TX_OK;
+}
+
+int gether_pamu3_connect(struct gether *link)
+{
+	struct eth_dev *dev = link->ioport;
+	int ret;
+
+	if (!dev || READ_ONCE(dev->pamu3) || dev->port_usb)
+		return -EBUSY;
+	/* Reject the unsupported MTU before publishing the SIPA callback. */
+	if (dev->net->mtu > ETH_DATA_LEN)
+		return -EOPNOTSUPP;
+	netif_napi_add(dev->net, &dev->pamu3_napi, gether_pamu3_poll);
+	INIT_DELAYED_WORK(&dev->pamu3_tx_retry, gether_pamu3_tx_retry);
+	napi_enable(&dev->pamu3_napi);
+	ret = sipa_nic_open(SIPA_TERM_USB, -1, gether_pamu3_notify, dev);
+	if (ret < 0) {
+		napi_disable(&dev->pamu3_napi);
+		netif_napi_del(&dev->pamu3_napi);
+		return ret;
+	}
+	dev->pamu3_nic = ret;
+	spin_lock_irq(&dev->lock);
+	/* SIPA AP_ETH RX descriptors supply 1600-byte payload buffers. */
+	if (dev->net->mtu > ETH_DATA_LEN) {
+		spin_unlock_irq(&dev->lock);
+		sipa_nic_close(dev->pamu3_nic);
+		napi_disable(&dev->pamu3_napi);
+		netif_napi_del(&dev->pamu3_napi);
+		return -EOPNOTSUPP;
+	}
+	dev->port_usb = link;
+	WRITE_ONCE(dev->pamu3, true);
+	if (netif_running(dev->net)) {
+		if (link->open)
+			link->open(link);
+	} else if (link->close) {
+		link->close(link);
+	}
+	spin_unlock_irq(&dev->lock);
+	/* The successful RNDIS filter response publishes carrier after this. */
+	napi_schedule(&dev->pamu3_napi);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gether_pamu3_connect);
+
+void gether_pamu3_carrier(struct gether *link, bool on)
+{
+	struct eth_dev *dev = link->ioport;
+
+	if (on && READ_ONCE(dev->pamu3)) {
+		netif_carrier_on(dev->net);
+		if (netif_running(dev->net))
+			netif_wake_queue(dev->net);
+	} else {
+		netif_carrier_off(dev->net);
+		netif_stop_queue(dev->net);
+	}
+}
+EXPORT_SYMBOL_GPL(gether_pamu3_carrier);
+
+void gether_pamu3_disconnect(struct gether *link)
+{
+	struct eth_dev *dev = link->ioport;
+
+	if (!dev || !READ_ONCE(dev->pamu3))
+		return;
+	netif_carrier_off(dev->net);
+	netif_tx_disable(dev->net);
+	WRITE_ONCE(dev->pamu3, false);
+	sipa_nic_close(dev->pamu3_nic);
+	cancel_delayed_work_sync(&dev->pamu3_tx_retry);
+	napi_disable(&dev->pamu3_napi);
+	netif_napi_del(&dev->pamu3_napi);
+	spin_lock_irq(&dev->lock);
+	dev->port_usb = NULL;
+	spin_unlock_irq(&dev->lock);
+}
+EXPORT_SYMBOL_GPL(gether_pamu3_disconnect);
+#endif
+
 static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 					struct net_device *net)
 {
@@ -511,6 +676,12 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 		}
 		/* ignores USB_CDC_PACKET_TYPE_DIRECTED */
 	}
+
+	/* Share the mainline suspend and CDC/RNDIS filter policy above. */
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (READ_ONCE(dev->pamu3))
+		return gether_pamu3_xmit(dev, skb);
+#endif
 
 	spin_lock_irqsave(&dev->req_lock, flags);
 	/*
@@ -620,6 +791,13 @@ static int eth_open(struct net_device *net)
 	struct gether	*link;
 
 	DBG(dev, "%s\n", __func__);
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (READ_ONCE(dev->pamu3)) {
+		if (netif_carrier_ok(net))
+			netif_start_queue(net);
+		return 0;
+	}
+#endif
 	if (netif_carrier_ok(dev->net))
 		eth_start(dev, GFP_KERNEL);
 
@@ -645,6 +823,10 @@ static int eth_stop(struct net_device *net)
 		dev->net->stats.rx_errors, dev->net->stats.tx_errors
 		);
 
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (READ_ONCE(dev->pamu3))
+		return 0; /* function worker owns hardware stop and endpoint lifetime */
+#endif
 	/* ensure there are no more active requests */
 	spin_lock_irqsave(&dev->lock, flags);
 	if (dev->port_usb) {
@@ -713,12 +895,35 @@ static int get_ether_addr_str(u8 dev_addr[ETH_ALEN], char *str, int len)
 	return 18;
 }
 
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+static int gether_change_mtu(struct net_device *net, int mtu)
+{
+	struct eth_dev *dev = netdev_priv(net);
+	unsigned long flags;
+	int ret = 0;
+
+	/* net/core already checked min/max_mtu. Pair with PAM publication so a
+	 * concurrent MTU change cannot exceed its actual RX buffer geometry.
+	 */
+	spin_lock_irqsave(&dev->lock, flags);
+	if (dev->pamu3 && mtu > ETH_DATA_LEN)
+		ret = -EINVAL;
+	else
+		WRITE_ONCE(net->mtu, mtu);
+	spin_unlock_irqrestore(&dev->lock, flags);
+	return ret;
+}
+#endif
+
 static const struct net_device_ops eth_netdev_ops = {
-	.ndo_open		= eth_open,
-	.ndo_stop		= eth_stop,
-	.ndo_start_xmit		= eth_start_xmit,
-	.ndo_set_mac_address 	= eth_mac_addr,
-	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_open = eth_open,
+	.ndo_stop = eth_stop,
+	.ndo_start_xmit = eth_start_xmit,
+	.ndo_set_mac_address = eth_mac_addr,
+	.ndo_validate_addr = eth_validate_addr,
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	.ndo_change_mtu = gether_change_mtu,
+#endif
 };
 
 static const struct device_type gadget_type = {
@@ -1114,6 +1319,10 @@ void gether_cleanup(struct eth_dev *dev)
 	if (!dev)
 		return;
 
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (READ_ONCE(dev->pamu3))
+		gether_pamu3_disconnect(dev->port_usb);
+#endif
 	unregister_netdev(dev->net);
 	flush_work(&dev->work);
 	free_netdev(dev->net);

@@ -513,6 +513,14 @@ static int gen_ndis_set_resp(struct rndis_params *params, u32 OID,
 		 *	PROMISCUOUS, DIRECTED,
 		 *	MULTICAST, ALL_MULTICAST, BROADCAST
 		 */
+		if (buf_len < sizeof(__le32) || !params->filter)
+			return -EINVAL;
+		if (params->set_filter) {
+			retval = params->set_filter(
+				params->v, (u16)get_unaligned_le32(buf));
+			if (retval)
+				return retval;
+		}
 		*params->filter = (u16)get_unaligned_le32(buf);
 		pr_debug("%s: RNDIS_OID_GEN_CURRENT_PACKET_FILTER %08x\n",
 			__func__, *params->filter);
@@ -524,9 +532,11 @@ static int gen_ndis_set_resp(struct rndis_params *params, u32 OID,
 		retval = 0;
 		if (*params->filter) {
 			params->state = RNDIS_DATA_INITIALIZED;
-			netif_carrier_on(params->dev);
-			if (netif_running(params->dev))
-				netif_wake_queue(params->dev);
+			if (!params->set_filter) {
+				netif_carrier_on(params->dev);
+				if (netif_running(params->dev))
+					netif_wake_queue(params->dev);
+			}
 		} else {
 			params->state = RNDIS_INITIALIZED;
 			netif_carrier_off(params->dev);
@@ -569,7 +579,13 @@ static int rndis_init_response(struct rndis_params *params,
 	resp->MessageType = cpu_to_le32(RNDIS_MSG_INIT_C);
 	resp->MessageLength = cpu_to_le32(52);
 	resp->RequestID = buf->RequestID; /* Still LE in msg buffer */
-	resp->Status = cpu_to_le32(RNDIS_STATUS_SUCCESS);
+	resp->Status = cpu_to_le32(
+		params->init_transfer &&
+				params->init_transfer(
+					params->v,
+					le32_to_cpu(buf->MaxTransferSize)) ?
+			RNDIS_STATUS_NOT_SUPPORTED :
+			RNDIS_STATUS_SUCCESS);
 	resp->MajorVersion = cpu_to_le32(RNDIS_MAJOR_VERSION);
 	resp->MinorVersion = cpu_to_le32(RNDIS_MINOR_VERSION);
 	resp->DeviceFlags = cpu_to_le32(RNDIS_DF_CONNECTIONLESS);
@@ -825,6 +841,8 @@ int rndis_msg_parser(struct rndis_params *params, u8 *buf)
 	case RNDIS_MSG_HALT:
 		pr_debug("%s: RNDIS_MSG_HALT\n",
 			__func__);
+		if (params->set_filter && params->set_filter(params->v, 0))
+			return -EBUSY;
 		params->state = RNDIS_UNINITIALIZED;
 		if (params->dev) {
 			netif_carrier_off(params->dev);
@@ -840,6 +858,8 @@ int rndis_msg_parser(struct rndis_params *params, u8 *buf)
 		return rndis_set_response(params, (rndis_set_msg_type *)buf);
 
 	case RNDIS_MSG_RESET:
+		if (params->set_filter && params->set_filter(params->v, 0))
+			return -EBUSY;
 		pr_debug("%s: RNDIS_MSG_RESET\n",
 			__func__);
 		return rndis_reset_response(params,

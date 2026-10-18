@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/sprd,orca-dwc3.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+title: Spreadtrum Orca DesignWare USB3 fixed-role glue
+maintainers:
+  - Jiayong Yang <jiayong.yang@unisoc.com>
+description: |
+  The parent initializes the PHY and performs the shared reset before creating
+  its DWC3 child. The child selects a fixed host or peripheral role.
+properties:
+  compatible:
+    const: sprd,orca-dwc3
+  reg:
+    maxItems: 1
+  '#address-cells':
+    const: 2
+  '#size-cells':
+    const: 2
+  ranges: true
+  clocks:
+    minItems: 3
+    maxItems: 3
+  clock-names:
+    items:
+      - const: core_clk
+      - const: ref_clk
+      - const: susp_clk
+  phys:
+    maxItems: 1
+  phy-names:
+    const: usb
+patternProperties:
+  '^dwc3@[0-9a-f]+$':
+    $ref: snps,dwc3.yaml#
+    properties:
+      dr_mode:
+        enum: [host, peripheral]
+    required: [dr_mode]
+required: [compatible, clocks, clock-names, phys, phy-names, ranges]
+additionalProperties: false

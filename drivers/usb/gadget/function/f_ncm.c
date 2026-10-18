@@ -22,6 +22,8 @@
 
 #include <linux/usb/cdc.h>
 #include <linux/usb/gadget.h>
+#include <linux/usb/sprd-pamu3.h>
+#include <linux/sizes.h>
 
 #include "u_ether.h"
 #include "u_ether_configfs.h"
@@ -76,6 +78,16 @@ struct f_ncm {
 	struct sk_buff			*skb_tx_ndp;
 	u16				ndp_dgram_count;
 	struct hrtimer			task_timer;
+	bool pam_optin, pam_running;
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	struct device *pam;
+	struct net_device *pam_net;
+	struct work_struct pam_work;
+	spinlock_t pam_lock;
+	bool pam_wanted, pam_pending, pam_prepared, pam_armed, pam_negotiated;
+	u32 pam_generation, pam_setup;
+	int pam_error;
+#endif
 };
 
 static inline struct f_ncm *func_to_ncm(struct usb_function *f)
@@ -531,6 +543,226 @@ static inline void ncm_reset_values(struct f_ncm *ncm)
 	ncm->port.fixed_in_len = NTB_DEFAULT_IN_SIZE;
 }
 
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+static void ncm_notify(struct f_ncm *ncm);
+
+static int ncm_pamu3_stop(struct f_ncm *ncm)
+{
+	int ret;
+
+	gether_pamu3_disconnect(&ncm->port);
+	ncm->netdev = NULL;
+	WRITE_ONCE(ncm->pam_running, false);
+	ret = sprd_pamu3_stop(ncm->pam);
+	if (!ret) {
+		ncm->pam_armed = false;
+		ncm->pam_prepared = false;
+	}
+	return ret;
+}
+
+static int ncm_pamu3_start(struct f_ncm *ncm, u32 generation, bool enable_dma)
+{
+	struct usb_function *f = &ncm->port.func;
+	struct sprd_pamu3_config cfg = {
+		.protocol = SPRD_PAMU3_NCM_NTB16,
+		.max_transfer = SZ_16K,
+		.nth_signature = USB_CDC_NCM_NTH16_SIGN,
+		.ndp_signature = USB_CDC_NCM_NDP16_NOCRC_SIGN,
+	};
+	u32 input_size = READ_ONCE(ncm->port.fixed_in_len);
+	unsigned long flags;
+	int ret;
+
+	if (ncm->pam_error)
+		return ncm->pam_error;
+	if (ncm->parser_opts != &ndp16_opts || ncm->is_crc ||
+	    input_size < USB_CDC_NCM_NTB_MIN_IN_SIZE || input_size > SZ_16K)
+		return -EOPNOTSUPP;
+	/* Include NTH/NDP, terminator, and all alignment in the host's limit.
+	 * Use the maximum permitted Ethernet MTU, so a later MTU increase is safe.
+	 */
+	cfg.max_packets =
+		min_t(u32, 7, (input_size - 128) / (ETH_FRAME_LEN + 4));
+	if (!cfg.max_packets)
+		return -EMSGSIZE;
+	if (!ncm->pam_prepared) {
+		ret = sprd_pamu3_prepare(ncm->pam);
+		if (ret)
+			return ret;
+		ncm->pam_prepared = true;
+	}
+	if (!ncm->pam_armed) {
+		ret = config_ep_by_speed(f->config->cdev->gadget, f,
+					 ncm->port.in_ep);
+		if (!ret)
+			ret = config_ep_by_speed(f->config->cdev->gadget, f,
+						 ncm->port.out_ep);
+		if (!ret)
+			ret = sprd_pamu3_arm(ncm->pam, ncm->port.out_ep,
+					     ncm->port.in_ep);
+		if (ret)
+			return ret;
+		ncm->pam_armed = true;
+	}
+	if (!READ_ONCE(ncm->pam_wanted) ||
+	    generation != READ_ONCE(ncm->pam_generation))
+		return -ECANCELED;
+	/* Linux toggles alt 1 -> 0 before GET_NTB_PARAMETERS. During that
+	 * discovery toggle, enable endpoints but leave PAM DMA unstarted.
+	 */
+	if (!enable_dma || !READ_ONCE(ncm->pam_negotiated))
+		return 0;
+	ret = sprd_pamu3_start(ncm->pam, &cfg);
+	if (!ret)
+		ret = gether_pamu3_connect(&ncm->port);
+	if (ret)
+		return ret;
+	spin_lock_irqsave(&ncm->pam_lock, flags);
+	if (!ncm->pam_wanted || generation != ncm->pam_generation) {
+		spin_unlock_irqrestore(&ncm->pam_lock, flags);
+		return -ECANCELED;
+	}
+	ncm->netdev = ncm->pam_net;
+	WRITE_ONCE(ncm->pam_running, true);
+	gether_pamu3_carrier(&ncm->port, true);
+	spin_unlock_irqrestore(&ncm->pam_lock, flags);
+	return 0;
+}
+
+static void ncm_pamu3_work(struct work_struct *work)
+{
+	struct f_ncm *ncm = container_of(work, struct f_ncm, pam_work);
+	struct usb_composite_dev *cdev = ncm->port.func.config->cdev;
+	unsigned long flags;
+	u32 generation, setup;
+	bool wanted, pending, again;
+	int ret, cleanup;
+
+	/* set_alt must return before composite publishes its delayed status. */
+	spin_lock_irqsave(&cdev->lock, flags);
+	spin_unlock_irqrestore(&cdev->lock, flags);
+	for (;;) {
+		spin_lock_irqsave(&ncm->pam_lock, flags);
+		generation = ncm->pam_generation;
+		setup = ncm->pam_setup;
+		wanted = ncm->pam_wanted;
+		pending = ncm->pam_pending;
+		spin_unlock_irqrestore(&ncm->pam_lock, flags);
+		/* A parameters request on an already armed alt 1 only starts DMA.
+		 * Real alternate-setting transitions still stop the previous state.
+		 */
+		ret = pending || !wanted || !ncm->pam_armed ?
+			      ncm_pamu3_stop(ncm) :
+			      0;
+		if (!ret && wanted)
+			ret = ncm_pamu3_start(ncm, generation, true);
+		if (ret) {
+			cleanup = ncm_pamu3_stop(ncm);
+			if (cleanup)
+				ncm->pam_error = cleanup;
+			pr_err("PAM NCM transition failed: %d (cleanup %d)\n",
+			       ret, cleanup);
+		}
+		if (pending) {
+			/* After negotiation, DMA must be ready before SET_INTERFACE
+			 * succeeds: the host may submit bulk OUT immediately. The
+			 * cold-boot resource wait ran before pullup, outside EP0's
+			 * deadline. The initial discovery alt 1 has no negotiated
+			 * NTB parameters and still only enables the endpoints.
+			 */
+			spin_lock_irqsave(&ncm->pam_lock, flags);
+			if (generation == ncm->pam_generation)
+				ncm->pam_pending = false;
+			spin_unlock_irqrestore(&ncm->pam_lock, flags);
+			ret = usb_composite_setup_continue_checked(
+				cdev, setup, &ncm->pam_generation, generation,
+				ret);
+		}
+		spin_lock_irqsave(&ncm->pam_lock, flags);
+		again = generation != ncm->pam_generation;
+		if (!again) {
+			ncm->pam_pending = false;
+			if (ret)
+				ncm->pam_wanted = false;
+		}
+		spin_unlock_irqrestore(&ncm->pam_lock, flags);
+		if (again)
+			continue;
+		if (ret && wanted) {
+			cleanup = ncm_pamu3_stop(ncm);
+			if (cleanup)
+				ncm->pam_error = cleanup;
+			if (ret != -ECANCELED)
+				pr_err("PAM NCM data start failed: %d (cleanup %d)\n",
+				       ret, cleanup);
+		}
+		spin_lock_irqsave(&ncm->lock, flags);
+		ncm->is_open = READ_ONCE(ncm->pam_running) &&
+			       netif_running(ncm->pam_net);
+		if (ncm->notify->enabled)
+			ncm_notify(ncm);
+		spin_unlock_irqrestore(&ncm->lock, flags);
+		return;
+	}
+}
+
+static int ncm_pamu3_set_alt(struct f_ncm *ncm, unsigned int alt)
+{
+	struct usb_composite_dev *cdev = ncm->port.func.config->cdev;
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&ncm->pam_lock, flags);
+	if (ncm->pam_pending) {
+		spin_unlock_irqrestore(&ncm->pam_lock, flags);
+		return -EBUSY;
+	}
+	ret = usb_composite_setup_defer_checked(cdev, &ncm->pam_setup);
+	if (!ret) {
+		ncm->pam_generation++;
+		ncm->pam_wanted = !!alt;
+		ncm->pam_pending = true;
+		sprd_pamu3_quiesce_atomic(ncm->pam);
+	}
+	spin_unlock_irqrestore(&ncm->pam_lock, flags);
+	if (ret)
+		return ret;
+	schedule_work(&ncm->pam_work);
+	return USB_GADGET_DELAYED_STATUS;
+}
+
+static void ncm_pamu3_parameters_seen(struct f_ncm *ncm)
+{
+	unsigned long flags;
+	bool start = false;
+
+	spin_lock_irqsave(&ncm->pam_lock, flags);
+	if (!ncm->pam_negotiated) {
+		ncm->pam_negotiated = true;
+		start = ncm->pam_wanted && !ncm->pam_running;
+	}
+	spin_unlock_irqrestore(&ncm->pam_lock, flags);
+	if (start)
+		schedule_work(&ncm->pam_work);
+}
+
+static void ncm_pamu3_disable(struct f_ncm *ncm)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ncm->pam_lock, flags);
+	ncm->pam_generation++;
+	ncm->pam_wanted = false;
+	ncm->pam_pending = false;
+	ncm->pam_negotiated = false;
+	gether_pamu3_carrier(&ncm->port, false);
+	sprd_pamu3_quiesce_atomic(ncm->pam);
+	spin_unlock_irqrestore(&ncm->pam_lock, flags);
+	schedule_work(&ncm->pam_work);
+}
+#endif
+
 /*
  * Context: ncm->lock held
  */
@@ -666,6 +898,15 @@ static void ncm_ep0out_complete(struct usb_ep *ep, struct usb_request *req)
 		DBG(cdev, "Got wrong INPUT SIZE (%d) from host\n", in_size);
 		goto invalid;
 	}
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	/* An acknowledged data alt setting also freezes framing while the
+	 * resource grant is pending; a new size belongs to the next alt 0.
+	 */
+	if (ncm->pam_optin && READ_ONCE(ncm->pam_wanted) &&
+	    READ_ONCE(ncm->pam_negotiated) &&
+	    in_size != READ_ONCE(ncm->port.fixed_in_len))
+		goto invalid;
+#endif
 
 	ncm->port.fixed_in_len = in_size;
 	VDBG(cdev, "Set NTB INPUT SIZE %d\n", in_size);
@@ -682,6 +923,7 @@ static int ncm_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 	struct usb_composite_dev *cdev = f->config->cdev;
 	struct usb_request	*req = cdev->req;
 	int			value = -EOPNOTSUPP;
+	bool ntb_parameters_reply __maybe_unused = false;
 	u16			w_index = le16_to_cpu(ctrl->wIndex);
 	u16			w_value = le16_to_cpu(ctrl->wValue);
 	u16			w_length = le16_to_cpu(ctrl->wLength);
@@ -723,9 +965,23 @@ static int ncm_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 
 		if (w_length == 0 || w_value != 0 || w_index != ncm->ctrl_id)
 			goto invalid;
+		ntb_parameters_reply = true;
 		value = w_length > sizeof ntb_parameters ?
 			sizeof ntb_parameters : w_length;
 		memcpy(req->buf, &ntb_parameters, value);
+		if (ncm->pam_optin) {
+			struct usb_cdc_ncm_ntb_parameters params =
+				ntb_parameters;
+			params.bmNtbFormatsSupported =
+				cpu_to_le16(USB_CDC_NCM_NTB16_SUPPORTED);
+			/* PAM packs Ethernet datagrams contiguously; only the NDP
+			 * itself is padded to a four-byte boundary. Table alignment
+			 * and datagram-payload alignment are distinct NCM fields.
+			 */
+			params.wNdpInDivisor = cpu_to_le16(1);
+			params.wNtbOutMaxDatagrams = cpu_to_le16(7);
+			memcpy(req->buf, &params, value);
+		}
 		VDBG(cdev, "Host asked NTB parameters\n");
 		break;
 
@@ -778,6 +1034,8 @@ static int ncm_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 			DBG(cdev, "NCM16 selected\n");
 			break;
 		case 0x0001:
+			if (ncm->pam_optin)
+				goto invalid;
 			ncm->parser_opts = &ndp32_opts;
 			DBG(cdev, "NCM32 selected\n");
 			break;
@@ -812,6 +1070,8 @@ static int ncm_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 			DBG(cdev, "non-CRC mode selected\n");
 			break;
 		case 0x0001:
+			if (ncm->pam_optin)
+				goto invalid;
 			ncm->is_crc = true;
 			DBG(cdev, "CRC mode selected\n");
 			break;
@@ -845,6 +1105,11 @@ invalid:
 		req->zero = 0;
 		req->length = value;
 		value = usb_ep_queue(cdev->gadget->ep0, req, GFP_ATOMIC);
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+		/* DWC3 reuses the SETUP/TRB storage while queueing this response. */
+		if (!value && ncm->pam && ntb_parameters_reply)
+			ncm_pamu3_parameters_seen(ncm);
+#endif
 		if (value < 0)
 			ERROR(cdev, "ncm req %02x.%02x response err %d\n",
 					ctrl->bRequestType, ctrl->bRequest,
@@ -880,6 +1145,10 @@ static int ncm_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	} else if (intf == ncm->data_id) {
 		if (alt > 1)
 			goto fail;
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+		if (ncm->pam)
+			return ncm_pamu3_set_alt(ncm, alt);
+#endif
 
 		if (ncm->netdev) {
 			DBG(cdev, "reset ncm\n");
@@ -943,6 +1212,10 @@ static int ncm_get_alt(struct usb_function *f, unsigned intf)
 
 	if (intf == ncm->ctrl_id)
 		return 0;
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (ncm->pam)
+		return READ_ONCE(ncm->pam_armed) ? 1 : 0;
+#endif
 	return ncm->port.in_ep->enabled ? 1 : 0;
 }
 
@@ -1379,9 +1652,16 @@ static void ncm_disable(struct usb_function *f)
 
 	DBG(cdev, "ncm deactivated\n");
 
-	if (ncm->netdev) {
-		ncm->netdev = NULL;
-		gether_disconnect(&ncm->port);
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (ncm->pam) {
+		ncm_pamu3_disable(ncm);
+	} else
+#endif
+	{
+		if (ncm->netdev) {
+			ncm->netdev = NULL;
+			gether_disconnect(&ncm->port);
+		}
 	}
 
 	if (ncm->notify->enabled) {
@@ -1455,9 +1735,13 @@ static int ncm_bind(struct usb_configuration *c, struct usb_function *f)
 		return -EINVAL;
 
 	ncm_opts = container_of(f->fi, struct f_ncm_opts, func_inst);
+	if (ncm->pam_optin && (!IS_ENABLED(CONFIG_SPRD_PAMU3) ||
+			       ncm_opts->max_segment_size > ETH_FRAME_LEN ||
+			       ncm_opts->max_segment_size < ETH_HLEN + 68))
+		return -EOPNOTSUPP;
 
 	if (cdev->use_os_string) {
-		os_desc_table = kzalloc(sizeof(*os_desc_table), GFP_KERNEL);
+		os_desc_table = kzalloc_obj(*os_desc_table, GFP_KERNEL);
 		if (!os_desc_table)
 			return -ENOMEM;
 	}
@@ -1555,6 +1839,50 @@ static int ncm_bind(struct usb_configuration *c, struct usb_function *f)
 			ncm_ss_function, ncm_ss_function);
 	if (status)
 		return status;
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (ncm->pam_optin) {
+		struct usb_descriptor_header **sets[] = {
+			f->fs_descriptors,
+			f->hs_descriptors,
+			f->ss_descriptors,
+			f->ssp_descriptors,
+		};
+		unsigned int i, j;
+
+		ncm->pam = sprd_pamu3_get(cdev->gadget->dev.parent);
+		if (IS_ERR(ncm->pam)) {
+			status = PTR_ERR(ncm->pam);
+			ncm->pam = NULL;
+			usb_free_all_descriptors(f);
+			return status;
+		}
+		status = sprd_pamu3_wait_ready(ncm->pam);
+		if (status) {
+			int cleanup = sprd_pamu3_put(ncm->pam);
+
+			if (cleanup)
+				pr_err("PAM NCM prebind resource remains pinned: %d\n",
+				       cleanup);
+			ncm->pam = NULL;
+			usb_free_all_descriptors(f);
+			return status;
+		}
+		ncm->pam_net = ncm_opts->net;
+		/* Change only this function's descriptor copies. */
+		for (i = 0; i < ARRAY_SIZE(sets); i++)
+			for (j = 0; sets[i] && sets[i][j]; j++) {
+				struct usb_cdc_ncm_desc *desc =
+					(void *)sets[i][j];
+				if (desc->bDescriptorType ==
+					    USB_DT_CS_INTERFACE &&
+				    desc->bLength >= sizeof(*desc) &&
+				    desc->bDescriptorSubType ==
+					    USB_CDC_NCM_TYPE)
+					desc->bmNetworkCapabilities &=
+						~USB_CDC_NCM_NCAP_CRC_MODE;
+			}
+	}
+#endif
 
 	/*
 	 * NOTE:  all that is done without knowing or caring about
@@ -1649,12 +1977,45 @@ out:
 
 CONFIGFS_ATTR(ncm_opts_, max_segment_size);
 
+static ssize_t ncm_opts_pamu3_show(struct config_item *item, char *page)
+{
+	struct f_ncm_opts *opts = to_f_ncm_opts(item);
+	bool enabled;
+
+	mutex_lock(&opts->lock);
+	enabled = opts->pamu3;
+	mutex_unlock(&opts->lock);
+	return sysfs_emit(page, "%u\n", enabled);
+}
+
+static ssize_t ncm_opts_pamu3_store(struct config_item *item, const char *page,
+				    size_t len)
+{
+	struct f_ncm_opts *opts = to_f_ncm_opts(item);
+	bool enabled;
+	int ret = kstrtobool(page, &enabled);
+
+	if (ret)
+		return ret;
+	if (enabled && !IS_ENABLED(CONFIG_SPRD_PAMU3))
+		return -EOPNOTSUPP;
+	mutex_lock(&opts->lock);
+	if (opts->refcnt)
+		ret = -EBUSY;
+	else
+		opts->pamu3 = enabled;
+	mutex_unlock(&opts->lock);
+	return ret ?: len;
+}
+CONFIGFS_ATTR(ncm_opts_, pamu3);
+
 static struct configfs_attribute *ncm_attrs[] = {
 	&ncm_opts_attr_dev_addr,
 	&ncm_opts_attr_host_addr,
 	&ncm_opts_attr_qmult,
 	&ncm_opts_attr_ifname,
 	&ncm_opts_attr_max_segment_size,
+	&ncm_opts_attr_pamu3,
 	NULL,
 };
 
@@ -1737,6 +2098,19 @@ static void ncm_unbind(struct usb_configuration *c, struct usb_function *f)
 	DBG(c->cdev, "ncm unbind\n");
 
 	ncm_opts = container_of(f->fi, struct f_ncm_opts, func_inst);
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (ncm->pam) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&c->cdev->lock, flags);
+		ncm_pamu3_disable(ncm);
+		spin_unlock_irqrestore(&c->cdev->lock, flags);
+		flush_work(&ncm->pam_work);
+		if (sprd_pamu3_put(ncm->pam))
+			pr_err("PAM NCM provider remains pinned after unbind\n");
+		ncm->pam = NULL;
+	}
+#endif
 
 	hrtimer_cancel(&ncm->task_timer);
 
@@ -1773,6 +2147,11 @@ static struct usb_function *ncm_alloc(struct usb_function_instance *fi)
 	opts = container_of(fi, struct f_ncm_opts, func_inst);
 	mutex_lock(&opts->lock);
 	opts->refcnt++;
+	ncm->pam_optin = opts->pamu3;
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	spin_lock_init(&ncm->pam_lock);
+	INIT_WORK(&ncm->pam_work, ncm_pamu3_work);
+#endif
 
 	/* export host's Ethernet address in CDC format */
 	status = gether_get_host_addr_cdc(opts->net, ncm->ethaddr,

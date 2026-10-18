@@ -173,6 +173,9 @@ typedef struct rndis_params {
 	const char		*vendorDescr;
 	void			(*resp_avail)(void *v);
 	void			*v;
+	/* Optional transport callbacks; caller runs parser in process context. */
+	int (*set_filter)(void *v, u16 filter);
+	int (*init_transfer)(void *v, u32 max_transfer);
 	struct list_head	resp_queue;
 	spinlock_t		resp_lock;
 } rndis_params;

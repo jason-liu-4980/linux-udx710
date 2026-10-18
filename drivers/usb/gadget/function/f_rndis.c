@@ -25,6 +25,11 @@
 #include "u_ether.h"
 #include "u_ether_configfs.h"
 #include "u_rndis.h"
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+#include <linux/usb/sprd-pamu3.h>
+#include <linux/sizes.h>
+#include <linux/unaligned.h>
+#endif
 #include "rndis.h"
 #include "configfs.h"
 
@@ -80,12 +85,323 @@ struct f_rndis {
 	struct usb_ep			*notify;
 	struct usb_request		*notify_req;
 	atomic_t			notify_count;
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	bool pam_optin, pam_wanted, pam_pending, pam_prepared, pam_armed,
+		pam_running;
+	bool pam_init_valid;
+	int pam_error;
+	u32 pam_generation, pam_setup;
+	struct device *pam;
+	struct work_struct pam_work;
+	spinlock_t pam_lock;
+	struct list_head pam_commands;
+	unsigned int pam_command_count;
+	struct sprd_pamu3_config pam_config;
+#endif
 };
 
 static inline struct f_rndis *func_to_rndis(struct usb_function *f)
 {
 	return container_of(f, struct f_rndis, port.func);
 }
+
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+struct rndis_pamu3_command {
+	struct list_head node;
+	u32 generation;
+	u8 data[];
+};
+
+static int rndis_pamu3_arm(struct f_rndis *rndis)
+{
+	struct usb_function *f = &rndis->port.func;
+	int ret;
+
+	if (rndis->pam_armed)
+		return 0;
+	if (!rndis->pam_prepared) {
+		ret = sprd_pamu3_prepare(rndis->pam);
+		if (ret)
+			return ret;
+		rndis->pam_prepared = true;
+	}
+	ret = config_ep_by_speed(f->config->cdev->gadget, f, rndis->port.in_ep);
+	if (!ret)
+		ret = config_ep_by_speed(f->config->cdev->gadget, f,
+					 rndis->port.out_ep);
+	if (!ret)
+		ret = sprd_pamu3_arm(rndis->pam, rndis->port.out_ep,
+				     rndis->port.in_ep);
+	if (!ret)
+		rndis->pam_armed = true;
+	return ret;
+}
+
+static int rndis_pamu3_stop(struct f_rndis *rndis)
+{
+	int ret;
+
+	gether_pamu3_disconnect(&rndis->port);
+	/* Normal STOP lets published AP TX drain before stopping PAM. USB
+	 * reset/disable still invokes the separate atomic quiesce front half.
+	 */
+	ret = sprd_pamu3_stop(rndis->pam);
+	if (!ret) {
+		rndis->pam_running = false;
+		rndis->pam_armed = false;
+		rndis->pam_prepared = false;
+	}
+	return ret;
+}
+
+static int rndis_pamu3_filter(void *data, u16 filter)
+{
+	struct f_rndis *rndis = data;
+	int ret, cleanup;
+	u32 generation = READ_ONCE(rndis->pam_generation);
+	unsigned long flags;
+
+	if (!filter) {
+		ret = rndis_pamu3_stop(rndis);
+		if (ret)
+			rndis->pam_error = ret;
+		return ret;
+	}
+	if (!READ_ONCE(rndis->pam_wanted))
+		return -ESHUTDOWN;
+	if (!READ_ONCE(rndis->pam_init_valid))
+		return -EPROTO;
+	if (rndis->pam_error)
+		return rndis->pam_error;
+	if (rndis->pam_running)
+		return 0;
+	ret = rndis_pamu3_arm(rndis);
+	if (!ret && (!READ_ONCE(rndis->pam_wanted) ||
+		     generation != READ_ONCE(rndis->pam_generation)))
+		ret = -ECANCELED;
+	if (!ret)
+		ret = sprd_pamu3_start(rndis->pam, &rndis->pam_config);
+	if (!ret)
+		ret = gether_pamu3_connect(&rndis->port);
+	if (ret) {
+		cleanup = rndis_pamu3_stop(rndis);
+		if (cleanup) {
+			rndis->pam_error = cleanup;
+			pr_err("PAM RNDIS rollback pinned: %d (activation %d)\n",
+			       cleanup, ret);
+		}
+		return ret;
+	}
+	spin_lock_irqsave(&rndis->pam_lock, flags);
+	if (!rndis->pam_wanted || generation != rndis->pam_generation) {
+		spin_unlock_irqrestore(&rndis->pam_lock, flags);
+		ret = rndis_pamu3_stop(rndis);
+		return ret ?: -ECANCELED;
+	}
+	rndis->pam_running = true;
+	gether_pamu3_carrier(&rndis->port, true);
+	spin_unlock_irqrestore(&rndis->pam_lock, flags);
+	return 0;
+}
+
+static int rndis_pamu3_init_transfer(void *data, u32 max_transfer)
+{
+	struct f_rndis *rndis = data;
+	u32 packet_bytes = rndis->params->dev->mtu + ETH_HLEN +
+			   sizeof(struct rndis_packet_msg_type) + 22;
+
+	/* INIT's MaxTransferSize bounds device-to-host transfers. The fixed
+	 * 16 KiB PAM RX TRBs describe the opposite direction. With one packet
+	 * per transfer, use the same packet bound as our INIT response; Linux
+	 * normally offers a 2048-byte receive URB for a 1500-byte MTU.
+	 */
+	WRITE_ONCE(rndis->pam_init_valid, rndis->pam_config.max_packets == 1 &&
+						  max_transfer >= packet_bytes);
+	if (!READ_ONCE(rndis->pam_init_valid))
+		return -EOPNOTSUPP;
+	rndis->pam_config.max_transfer = SZ_16K;
+	return 0;
+}
+
+static void rndis_pamu3_work(struct work_struct *work)
+{
+	struct f_rndis *rndis = container_of(work, struct f_rndis, pam_work);
+	struct usb_composite_dev *cdev = rndis->port.func.config->cdev;
+	struct rndis_pamu3_command *cmd;
+	unsigned long flags;
+	u32 generation, setup;
+	bool wanted, pending;
+	int ret;
+
+	/* Fence set_alt's return and composite's delayed_status increment. */
+	spin_lock_irqsave(&cdev->lock, flags);
+	spin_unlock_irqrestore(&cdev->lock, flags);
+	for (;;) {
+		spin_lock_irqsave(&rndis->pam_lock, flags);
+		generation = rndis->pam_generation;
+		setup = rndis->pam_setup;
+		wanted = rndis->pam_wanted;
+		pending = rndis->pam_pending;
+		cmd = NULL;
+		if (!list_empty(&rndis->pam_commands)) {
+			cmd = list_first_entry(&rndis->pam_commands,
+					       struct rndis_pamu3_command,
+					       node);
+			list_del(&cmd->node);
+			rndis->pam_command_count--;
+		}
+		spin_unlock_irqrestore(&rndis->pam_lock, flags);
+		if (!wanted) {
+			kfree(cmd);
+			ret = rndis_pamu3_stop(rndis);
+			if (ret)
+				pr_err("PAM RNDIS disconnect pinned: %d\n",
+				       ret);
+			rndis_uninit(rndis->params);
+			spin_lock_irqsave(&rndis->pam_lock, flags);
+			pending = !list_empty(&rndis->pam_commands) ||
+				  rndis->pam_wanted;
+			spin_unlock_irqrestore(&rndis->pam_lock, flags);
+			if (pending)
+				continue;
+			return;
+		}
+		if (pending) {
+			ret = rndis_pamu3_stop(
+				rndis); /* repeated SET_INTERFACE rollback */
+			if (!ret)
+				ret = rndis_pamu3_arm(rndis);
+			if (ret) {
+				int cleanup = rndis_pamu3_stop(rndis);
+
+				if (cleanup)
+					rndis->pam_error = cleanup;
+			}
+			ret = usb_composite_setup_continue_checked(
+				cdev, setup, &rndis->pam_generation, generation,
+				ret);
+			spin_lock_irqsave(&rndis->pam_lock, flags);
+			if (generation == rndis->pam_generation) {
+				rndis->pam_pending = false;
+				if (ret)
+					rndis->pam_wanted = false;
+			}
+			spin_unlock_irqrestore(&rndis->pam_lock, flags);
+			if (ret) {
+				kfree(cmd);
+				continue;
+			}
+		}
+		if (cmd) {
+			if (cmd->generation ==
+				    READ_ONCE(rndis->pam_generation) &&
+			    READ_ONCE(rndis->pam_wanted)) {
+				ret = rndis_msg_parser(rndis->params,
+						       cmd->data);
+				if (ret)
+					pr_err("PAM RNDIS command failed: %d\n",
+					       ret);
+			}
+			kfree(cmd);
+			continue;
+		}
+		return;
+	}
+}
+
+static int rndis_pamu3_set_alt(struct f_rndis *rndis)
+{
+	struct usb_composite_dev *cdev = rndis->port.func.config->cdev;
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&rndis->pam_lock, flags);
+	if (rndis->pam_pending) {
+		spin_unlock_irqrestore(&rndis->pam_lock, flags);
+		return -EBUSY;
+	}
+	ret = usb_composite_setup_defer_checked(cdev, &rndis->pam_setup);
+	if (ret) {
+		spin_unlock_irqrestore(&rndis->pam_lock, flags);
+		return ret;
+	}
+	rndis->pam_generation++;
+	rndis->pam_wanted = true;
+	WRITE_ONCE(rndis->pam_init_valid, false);
+	rndis->pam_pending = true;
+	sprd_pamu3_quiesce_atomic(rndis->pam);
+	spin_unlock_irqrestore(&rndis->pam_lock, flags);
+	schedule_work(&rndis->pam_work);
+	return USB_GADGET_DELAYED_STATUS;
+}
+
+static void rndis_pamu3_disable(struct f_rndis *rndis)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&rndis->pam_lock, flags);
+	rndis->pam_generation++;
+	rndis->pam_wanted = false;
+	WRITE_ONCE(rndis->pam_init_valid, false);
+	gether_pamu3_carrier(&rndis->port, false);
+	rndis->pam_pending = false;
+	sprd_pamu3_quiesce_atomic(rndis->pam);
+	spin_unlock_irqrestore(&rndis->pam_lock, flags);
+	schedule_work(&rndis->pam_work);
+}
+
+static int rndis_pamu3_queue_command(struct f_rndis *rndis,
+				     struct usb_request *req)
+{
+	struct rndis_pamu3_command *cmd;
+	u32 type, length, offset, bytes;
+	unsigned long flags;
+
+	if (req->status || req->actual < 8 ||
+	    req->actual > RNDIS_MAX_TOTAL_SIZE)
+		return -EINVAL;
+	type = get_unaligned_le32(req->buf);
+	length = get_unaligned_le32(req->buf + 4);
+	if (length != req->actual)
+		return -EMSGSIZE;
+	switch (type) {
+	case RNDIS_MSG_INIT:
+		if (length < sizeof(rndis_init_msg_type))
+			return -EINVAL;
+		break;
+	case RNDIS_MSG_QUERY:
+	case RNDIS_MSG_SET:
+		if (length < sizeof(rndis_set_msg_type))
+			return -EINVAL;
+		bytes = get_unaligned_le32(req->buf + 16);
+		offset = get_unaligned_le32(req->buf + 20);
+		if ((bytes && offset < sizeof(rndis_set_msg_type) - 8) ||
+		    offset > length - 8 || bytes > length - 8 - offset)
+			return -EINVAL;
+		break;
+	default:
+		if (length < 12)
+			return -EINVAL;
+	}
+	cmd = kzalloc(sizeof(*cmd) + length + 16, GFP_ATOMIC);
+	if (!cmd)
+		return -ENOMEM;
+	memcpy(cmd->data, req->buf, length);
+	spin_lock_irqsave(&rndis->pam_lock, flags);
+	if (!rndis->pam_wanted || rndis->pam_pending ||
+	    rndis->pam_command_count >= 8) {
+		spin_unlock_irqrestore(&rndis->pam_lock, flags);
+		kfree(cmd);
+		return -EBUSY;
+	}
+	cmd->generation = rndis->pam_generation;
+	list_add_tail(&cmd->node, &rndis->pam_commands);
+	rndis->pam_command_count++;
+	spin_unlock_irqrestore(&rndis->pam_lock, flags);
+	schedule_work(&rndis->pam_work);
+	return 0;
+}
+#endif
 
 /*-------------------------------------------------------------------------*/
 
@@ -442,6 +758,14 @@ static void rndis_command_complete(struct usb_ep *ep, struct usb_request *req)
 	struct f_rndis			*rndis = req->context;
 	int				status;
 
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (rndis->pam) {
+		status = rndis_pamu3_queue_command(rndis, req);
+		if (status)
+			usb_ep_set_halt(ep);
+		return;
+	}
+#endif
 	/* received RNDIS command from USB_CDC_SEND_ENCAPSULATED_COMMAND */
 //	spin_lock(&dev->lock);
 	status = rndis_msg_parser(rndis->params, (u8 *) req->buf);
@@ -547,6 +871,10 @@ static int rndis_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	} else if (intf == rndis->data_id) {
 		struct net_device	*net;
 
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+		if (rndis->pam)
+			return rndis_pamu3_set_alt(rndis);
+#endif
 		if (rndis->port.in_ep->enabled) {
 			DBG(cdev, "reset rndis\n");
 			gether_disconnect(&rndis->port);
@@ -601,13 +929,25 @@ static void rndis_disable(struct usb_function *f)
 	struct f_rndis		*rndis = func_to_rndis(f);
 	struct usb_composite_dev *cdev = f->config->cdev;
 
-	if (!rndis->notify->enabled)
+	if (!rndis->notify->enabled) {
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+		if (rndis->pam)
+			rndis_pamu3_disable(rndis);
+#endif
 		return;
+	}
 
 	DBG(cdev, "rndis deactivated\n");
 
-	rndis_uninit(rndis->params);
-	gether_disconnect(&rndis->port);
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (rndis->pam)
+		rndis_pamu3_disable(rndis);
+	else
+#endif
+	{
+		rndis_uninit(rndis->params);
+		gether_disconnect(&rndis->port);
+	}
 
 	usb_ep_disable(rndis->notify);
 	rndis->notify->desc = NULL;
@@ -792,6 +1132,21 @@ rndis_bind(struct usb_configuration *c, struct usb_function *f)
 		f->os_desc_n = 1;
 
 	}
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (rndis->pam_optin) {
+		rndis->pam = sprd_pamu3_get(cdev->gadget->dev.parent);
+		if (IS_ERR(rndis->pam)) {
+			status = PTR_ERR(rndis->pam);
+			rndis->pam = NULL;
+			usb_free_all_descriptors(f);
+			return status;
+		}
+		rndis_set_param_dev(rndis->params, rndis_opts->net,
+				    &rndis->port.cdc_filter);
+		rndis->params->set_filter = rndis_pamu3_filter;
+		rndis->params->init_transfer = rndis_pamu3_init_transfer;
+	}
+#endif
 	rndis->notify_req = no_free_ptr(request);
 
 	rndis_opts->bind_count++;
@@ -851,6 +1206,9 @@ USB_ETHER_CONFIGFS_ITEM_ATTR_U8_RW(rndis, subclass);
 
 /* f_rndis_opts_protocol */
 USB_ETHER_CONFIGFS_ITEM_ATTR_U8_RW(rndis, protocol);
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+USB_ETHER_CONFIGFS_ITEM_ATTR_U8_RW(rndis, pamu3);
+#endif
 
 static struct configfs_attribute *rndis_attrs[] = {
 	&rndis_opts_attr_dev_addr,
@@ -860,6 +1218,9 @@ static struct configfs_attribute *rndis_attrs[] = {
 	&rndis_opts_attr_class,
 	&rndis_opts_attr_subclass,
 	&rndis_opts_attr_protocol,
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	&rndis_opts_attr_pamu3,
+#endif
 	NULL,
 };
 
@@ -947,6 +1308,21 @@ static void rndis_unbind(struct usb_configuration *c, struct usb_function *f)
 	struct f_rndis_opts	*rndis_opts;
 
 	rndis_opts = container_of(f->fi, struct f_rndis_opts, func_inst);
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	if (rndis->pam) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&c->cdev->lock, flags);
+		rndis_pamu3_disable(rndis);
+		spin_unlock_irqrestore(&c->cdev->lock, flags);
+		flush_work(&rndis->pam_work);
+		rndis->params->set_filter = NULL;
+		rndis->params->init_transfer = NULL;
+		if (sprd_pamu3_put(rndis->pam))
+			pr_err("PAM provider remains pinned after function unbind\n");
+		rndis->pam = NULL;
+	}
+#endif
 
 	kfree(f->os_desc_table);
 	f->os_desc_n = 0;
@@ -980,6 +1356,17 @@ static struct usb_function *rndis_alloc(struct usb_function_instance *fi)
 	rndis->manufacturer = opts->manufacturer;
 
 	rndis->port.ioport = netdev_priv(opts->net);
+#if IS_ENABLED(CONFIG_SPRD_PAMU3)
+	rndis->pam_optin = !!opts->pamu3;
+	INIT_WORK(&rndis->pam_work, rndis_pamu3_work);
+	spin_lock_init(&rndis->pam_lock);
+	INIT_LIST_HEAD(&rndis->pam_commands);
+	rndis->pam_config.protocol = SPRD_PAMU3_RNDIS;
+	rndis->pam_config.max_packets = 1;
+	rndis->pam_config.max_transfer = SZ_16K;
+	ether_addr_copy(rndis->pam_config.host_mac, rndis->ethaddr);
+	ether_addr_copy(rndis->pam_config.dev_mac, opts->net->dev_addr);
+#endif
 	mutex_unlock(&opts->lock);
 	/* RNDIS activates when the host changes this filter */
 	rndis->port.cdc_filter = 0;

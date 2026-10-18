@@ -42,6 +42,7 @@ struct f_ncm_opts {
 	int				refcnt;
 
 	u16				max_segment_size;
+	bool pamu3;
 };
 
 #endif /* U_NCM_H */

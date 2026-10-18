@@ -32,6 +32,7 @@
 #include <linux/bitfield.h>
 
 #include <linux/usb/ch9.h>
+#include <linux/usb/sprd-pamu3.h>
 #include <linux/usb/gadget.h>
 #include <linux/usb/of.h>
 #include <linux/usb/otg.h>
@@ -514,7 +515,18 @@ static struct dwc3_event_buffer *dwc3_alloc_one_event_buffer(struct dwc3 *dwc,
 static void dwc3_free_event_buffers(struct dwc3 *dwc)
 {
 	struct dwc3_event_buffer	*evt;
+	unsigned int i;
 
+	/* The supplier link must have detached PAM before coherent memory frees. */
+	if (WARN_ON(dwc->pamu3_owner))
+		return;
+	for (i = 0; i < ARRAY_SIZE(dwc->pamu3_events); i++) {
+		evt = dwc->pamu3_events[i];
+		if (evt) {
+			dwc3_free_one_event_buffer(dwc, evt);
+			dwc->pamu3_events[i] = NULL;
+		}
+	}
 	evt = dwc->ev_buf;
 	if (evt)
 		dwc3_free_one_event_buffer(dwc, evt);
@@ -531,7 +543,8 @@ static void dwc3_free_event_buffers(struct dwc3 *dwc)
 static int dwc3_alloc_event_buffers(struct dwc3 *dwc, unsigned int length)
 {
 	struct dwc3_event_buffer *evt;
-	unsigned int hw_mode;
+	unsigned int hw_mode, i;
+	int ret;
 
 	hw_mode = DWC3_GHWPARAMS0_MODE(dwc->hwparams.hwparams0);
 	if (hw_mode == DWC3_GHWPARAMS0_MODE_HOST) {
@@ -545,8 +558,29 @@ static int dwc3_alloc_event_buffers(struct dwc3 *dwc, unsigned int length)
 		return PTR_ERR(evt);
 	}
 	dwc->ev_buf = evt;
-
+	if (dwc->pamu3_capable) {
+		if (DWC3_NUM_INT(dwc->hwparams.hwparams1) < 3) {
+			ret = -EOPNOTSUPP;
+			goto fail;
+		}
+		for (i = 0; i < ARRAY_SIZE(dwc->pamu3_events); i++) {
+			evt = dwc3_alloc_one_event_buffer(dwc, length);
+			if (IS_ERR(evt)) {
+				ret = PTR_ERR(evt);
+				goto fail;
+			}
+			dwc->pamu3_events[i] = evt;
+			if ((u64)evt->dma + length - 1 > DMA_BIT_MASK(40)) {
+				ret = -ERANGE;
+				goto fail;
+			}
+		}
+	}
 	return 0;
+fail:
+	dwc3_free_event_buffers(dwc);
+	dwc->ev_buf = NULL;
+	return ret;
 }
 
 /**
@@ -559,6 +593,7 @@ int dwc3_event_buffers_setup(struct dwc3 *dwc)
 {
 	struct dwc3_event_buffer	*evt;
 	u32				reg;
+	unsigned int i;
 
 	if (!dwc->ev_buf)
 		return 0;
@@ -575,6 +610,22 @@ int dwc3_event_buffers_setup(struct dwc3 *dwc)
 	/* Clear any stale event */
 	reg = dwc3_readl(dwc, DWC3_GEVNTCOUNT(0));
 	dwc3_writel(dwc, DWC3_GEVNTCOUNT(0), reg);
+	for (i = 0; i < ARRAY_SIZE(dwc->pamu3_events); i++) {
+		evt = dwc->pamu3_events[i];
+		if (!evt)
+			continue;
+		evt->lpos = 0;
+		dwc3_writel(dwc, DWC3_GEVNTADRLO(i + 1),
+			    lower_32_bits(evt->dma));
+		dwc3_writel(dwc, DWC3_GEVNTADRHI(i + 1),
+			    upper_32_bits(evt->dma));
+		dwc3_writel(dwc, DWC3_GEVNTSIZ(i + 1),
+			    DWC3_GEVNTSIZ_SIZE(evt->length) |
+				    DWC3_GEVNTSIZ_INTMASK);
+		reg = dwc3_readl(dwc, DWC3_GEVNTCOUNT(i + 1));
+		dwc3_writel(dwc, DWC3_GEVNTCOUNT(i + 1), reg);
+	}
+	dwc->pamu3_generation++;
 	return 0;
 }
 
@@ -582,6 +633,7 @@ void dwc3_event_buffers_cleanup(struct dwc3 *dwc)
 {
 	struct dwc3_event_buffer	*evt;
 	u32				reg;
+	unsigned int i;
 
 	if (!dwc->ev_buf)
 		return;
@@ -605,6 +657,15 @@ void dwc3_event_buffers_cleanup(struct dwc3 *dwc)
 	/* Clear any stale event */
 	reg = dwc3_readl(dwc, DWC3_GEVNTCOUNT(0));
 	dwc3_writel(dwc, DWC3_GEVNTCOUNT(0), reg);
+	for (i = 0; i < ARRAY_SIZE(dwc->pamu3_events); i++) {
+		if (!dwc->pamu3_events[i])
+			continue;
+		dwc3_writel(dwc, DWC3_GEVNTSIZ(i + 1), DWC3_GEVNTSIZ_INTMASK);
+		dwc3_writel(dwc, DWC3_GEVNTADRLO(i + 1), 0);
+		dwc3_writel(dwc, DWC3_GEVNTADRHI(i + 1), 0);
+		reg = dwc3_readl(dwc, DWC3_GEVNTCOUNT(i + 1));
+		dwc3_writel(dwc, DWC3_GEVNTCOUNT(i + 1), reg);
+	}
 }
 
 static void dwc3_core_num_eps(struct dwc3 *dwc)
@@ -2315,6 +2376,11 @@ int dwc3_core_probe(const struct dwc3_probe_data *data)
 	dwc->regs_size	= resource_size(&dwc_res);
 
 	dwc3_get_properties(dwc);
+	dwc->pamu3_capable =
+		device_property_read_bool(dev, "sprd,pamu3-offload");
+	if (dwc->pamu3_capable && !IS_ENABLED(CONFIG_SPRD_PAMU3))
+		return -EOPNOTSUPP;
+	dwc->pamu3_regs_phys = res->start;
 
 	dwc3_get_software_properties(dwc, &data->properties);
 
@@ -2354,6 +2420,15 @@ int dwc3_core_probe(const struct dwc3_probe_data *data)
 	if (!dev_is_pci(dwc->sysdev) &&
 	    DWC3_GHWPARAMS0_AWIDTH(dwc->hwparams.hwparams0) == 64) {
 		ret = dma_set_mask_and_coherent(dwc->sysdev, DMA_BIT_MASK(64));
+		if (ret)
+			goto err_disable_clks;
+	}
+
+	if (dwc->pamu3_capable) {
+		/* PAM address fields encode exactly 40 bits, including event buffers. */
+		ret = dma_set_mask_and_coherent(
+			dwc->sysdev, min_t(u64, dma_get_mask(dwc->sysdev),
+					   DMA_BIT_MASK(40)));
 		if (ret)
 			goto err_disable_clks;
 	}
@@ -2399,6 +2474,10 @@ int dwc3_core_probe(const struct dwc3_probe_data *data)
 	if (ret)
 		goto err_free_event_buffers;
 
+	if (dwc->pamu3_capable && dwc->dr_mode != USB_DR_MODE_PERIPHERAL) {
+		ret = -EOPNOTSUPP;
+		goto err_free_event_buffers;
+	}
 	ret = dwc3_core_init(dwc);
 	if (ret) {
 		dev_err_probe(dev, ret, "failed to initialize core\n");
@@ -2507,6 +2586,71 @@ void dwc3_core_remove(struct dwc3 *dwc)
 }
 EXPORT_SYMBOL_GPL(dwc3_core_remove);
 
+/* Consumer holds a supplier link and pins controller runtime PM. */
+int dwc3_pamu3_attach(struct device *controller, struct device *owner,
+		      struct dwc3_pamu3_resources *resources)
+{
+	struct dwc3 *dwc = dev_get_drvdata(controller);
+	unsigned long flags;
+	unsigned int i;
+	int ret;
+
+	if (!dwc || !owner || !resources)
+		return -ENODEV;
+	if (!dwc->pamu3_capable || !dwc->gadget ||
+	    dwc->dr_mode != USB_DR_MODE_PERIPHERAL)
+		return -EOPNOTSUPP;
+	ret = pm_runtime_resume_and_get(controller);
+	if (ret < 0)
+		return ret;
+	spin_lock_irqsave(&dwc->lock, flags);
+	if (dwc->pamu3_owner) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+	for (i = 0; i < ARRAY_SIZE(dwc->pamu3_events); i++) {
+		if (!dwc->pamu3_events[i]) {
+			ret = -ENODEV;
+			goto unlock;
+		}
+		resources->event_dma[i] = dwc->pamu3_events[i]->dma;
+		resources->event_size[i] = dwc->pamu3_events[i]->length;
+	}
+	resources->dma_dev = dwc->sysdev;
+	resources->regs_phys = dwc->pamu3_regs_phys;
+	resources->generation = dwc->pamu3_generation;
+	dwc->pamu3_owner = owner;
+	ret = 0;
+unlock:
+	spin_unlock_irqrestore(&dwc->lock, flags);
+	if (ret)
+		pm_runtime_put(controller);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dwc3_pamu3_attach);
+
+int dwc3_pamu3_detach(struct device *controller, struct device *owner)
+{
+	struct dwc3 *dwc = dev_get_drvdata(controller);
+	unsigned long flags;
+	int ret = 0;
+
+	if (!dwc || !owner)
+		return -ENODEV;
+	spin_lock_irqsave(&dwc->lock, flags);
+	if (dwc->pamu3_owner != owner)
+		ret = -EPERM;
+	else if (dwc->pamu3_claimed)
+		ret = -EBUSY;
+	else
+		dwc->pamu3_owner = NULL;
+	spin_unlock_irqrestore(&dwc->lock, flags);
+	if (!ret)
+		pm_runtime_put(controller);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dwc3_pamu3_detach);
+
 static void dwc3_remove(struct platform_device *pdev)
 {
 	dwc3_core_remove(platform_get_drvdata(pdev));
@@ -2544,6 +2688,10 @@ static int dwc3_suspend_common(struct dwc3 *dwc, pm_message_t msg)
 	u32 reg;
 	int i;
 	int ret;
+
+	/* No silent suspend under a second DMA master. Release PAM first. */
+	if (READ_ONCE(dwc->pamu3_owner))
+		return -EBUSY;
 
 	if (!pm_runtime_suspended(dwc->dev) && !PMSG_IS_AUTO(msg)) {
 		dwc->susphy_state = (dwc3_readl(dwc, DWC3_GUSB2PHYCFG(0)) &
@@ -2925,6 +3073,9 @@ static struct platform_driver dwc3_driver = {
 		.of_match_table	= of_match_ptr(of_dwc3_match),
 		.acpi_match_table = ACPI_PTR(dwc3_acpi_match),
 		.pm	= &dwc3_dev_pm_ops,
+		/* Orca PHY/vser ownership also outlives failed teardown. */
+		.suppress_bind_attrs = IS_ENABLED(CONFIG_SPRD_PAMU3) ||
+			IS_ENABLED(CONFIG_PHY_SPRD_ORCA_USB),
 	},
 };
 
@@ -2932,5 +3083,5 @@ module_platform_driver(dwc3_driver);
 
 MODULE_ALIAS("platform:dwc3");
 MODULE_AUTHOR("Felipe Balbi <balbi@ti.com>");
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DesignWare USB3 DRD Controller Driver");

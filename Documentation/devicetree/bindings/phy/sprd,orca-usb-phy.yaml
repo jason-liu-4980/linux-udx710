@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/phy/sprd,orca-usb-phy.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+title: Spreadtrum Orca USB2 and USB3 analog PHY
+maintainers:
+  - Jiayong Yang <jiayong.yang@unisoc.com>
+description: |
+  Each instance contains both USB2 and USB3 functions. The same zero-cell
+  phandle is supplied for both DWC3 PHY inputs. USB0 has its own reset, while
+  USB1 shares a reset group with PAM. The driver holds shared analog settings
+  while either port is active and applies the fixed host/peripheral role to
+  each port separately. vdd-supply describes the PHY analog rail.
+properties:
+  compatible:
+    enum: ['sprd,orca1-ssphy0', 'sprd,orca1-ssphy1']
+  reg:
+    maxItems: 1
+  reg-names:
+    const: ssphy_glb_regs
+  '#phy-cells':
+    const: 0
+  resets:
+    maxItems: 1
+  vdd-supply: true
+  sprd,vdd-voltage:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 1200000
+    maximum: 3750000
+  sprd,syscon-anag4:
+    $ref: /schemas/types.yaml#/definitions/phandle
+  sprd,syscon-aon-apb:
+    $ref: /schemas/types.yaml#/definitions/phandle
+  sprd,syscon-ap-ahb:
+    $ref: /schemas/types.yaml#/definitions/phandle
+  sprd,syscon-ipa-ahb:
+    $ref: /schemas/types.yaml#/definitions/phandle
+required:
+  - compatible
+  - '#phy-cells'
+  - resets
+  - vdd-supply
+  - sprd,vdd-voltage
+  - sprd,syscon-anag4
+  - sprd,syscon-aon-apb
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: sprd,orca1-ssphy0
+    then:
+      required: ['sprd,syscon-ap-ahb']
+    else:
+      required: ['sprd,syscon-ipa-ahb']
+additionalProperties: false

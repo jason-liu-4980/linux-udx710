@@ -16,11 +16,13 @@
 #include <linux/pm_runtime.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/list.h>
 #include <linux/dma-mapping.h>
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
+#include <linux/usb/sprd-pamu3.h>
 
 #include "debug.h"
 #include "core.h"
@@ -660,6 +662,12 @@ static int dwc3_gadget_set_ep_config(struct dwc3_ep *dep, unsigned int action)
 		params.param1 |= DWC3_DEPCFG_BINTERVAL_M1(bInterval_m1);
 	}
 
+	if (dwc3_pamu3_ep_owned(dep)) {
+		if (!usb_endpoint_xfer_bulk(desc) || dep->stream_capable)
+			return -EOPNOTSUPP;
+		params.param1 |= DWC3_DEPCFG_INT_NUM(dep->direction ? 1 : 2);
+		params.param1 |= DWC3_DEPCFG_XFER_COMPLETE_EN;
+	}
 	return dwc3_send_gadget_ep_cmd(dep, DWC3_DEPCMD_SETEPCONFIG, &params);
 }
 
@@ -971,6 +979,8 @@ static int __dwc3_gadget_ep_enable(struct dwc3_ep *dep, unsigned int action)
 	 * Issue StartTransfer here with no-op TRB so we can always rely on No
 	 * Response Update Transfer command.
 	 */
+	if (dwc3_pamu3_ep_owned(dep))
+		goto out;
 	if (usb_endpoint_xfer_bulk(desc) ||
 			usb_endpoint_xfer_int(desc)) {
 		struct dwc3_gadget_ep_cmd_params params;
@@ -1180,11 +1190,176 @@ static int dwc3_gadget_ep_disable(struct usb_ep *ep)
 		return 0;
 
 	spin_lock_irqsave(&dwc->lock, flags);
-	ret = __dwc3_gadget_ep_disable(dep);
+	ret = dwc3_pamu3_ep_owned(dep) ? -EBUSY : __dwc3_gadget_ep_disable(dep);
 	spin_unlock_irqrestore(&dwc->lock, flags);
 
 	return ret;
 }
+
+int dwc3_pamu3_claim(struct device *controller, struct device *owner,
+		     struct usb_ep *out, struct usb_ep *in)
+{
+	struct dwc3 *dwc = dev_get_drvdata(controller);
+	struct dwc3_ep *dep;
+	unsigned long flags;
+	unsigned int i;
+	int ret = 0;
+
+	if (!dwc || !owner || !out || !in)
+		return -EINVAL;
+	spin_lock_irqsave(&dwc->lock, flags);
+	if (dwc->pamu3_owner != owner || !dwc->eps[2] || !dwc->eps[3] ||
+	    out != &dwc->eps[2]->endpoint || in != &dwc->eps[3]->endpoint) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (dwc->pamu3_claimed) {
+		ret = -EBUSY;
+		goto out;
+	}
+	for (i = 2; i <= 3; i++) {
+		dep = dwc->eps[i];
+		if (dep->flags & (DWC3_EP_ENABLED | DWC3_EP_TRANSFER_STARTED) ||
+		    !list_empty(&dep->pending_list) ||
+		    !list_empty(&dep->started_list) ||
+		    !list_empty(&dep->cancelled_list)) {
+			ret = -EBUSY;
+			goto out;
+		}
+	}
+	dwc->pamu3_claimed = true;
+	for (i = 1; i <= 2; i++) {
+		struct dwc3_event_buffer *evt = dwc->pamu3_events[i - 1];
+		u32 count;
+
+		/* PAM restarts its consumer at zero after its independent reset.
+		 * Both endpoints are disabled here; synchronize their dedicated
+		 * event buffers with that new epoch without touching event ring 0.
+		 */
+		dwc3_writel(dwc, DWC3_GEVNTSIZ(i),
+			    DWC3_GEVNTSIZ_INTMASK |
+				    DWC3_GEVNTSIZ_SIZE(evt->length));
+		count = dwc3_readl(dwc, DWC3_GEVNTCOUNT(i));
+		dwc3_writel(dwc, DWC3_GEVNTCOUNT(i), count);
+		memset(evt->buf, 0, evt->length);
+		evt->lpos = 0;
+		dma_wmb();
+		dwc3_writel(dwc, DWC3_GEVNTADRLO(i), lower_32_bits(evt->dma));
+		dwc3_writel(dwc, DWC3_GEVNTADRHI(i), upper_32_bits(evt->dma));
+		dwc3_writel(dwc, DWC3_GEVNTSIZ(i),
+			    DWC3_GEVNTSIZ_SIZE(evt->length));
+	}
+out:
+	spin_unlock_irqrestore(&dwc->lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dwc3_pamu3_claim);
+
+/* PAM issues STARTTRANSFER through MMIO, so dep->flags/resource_index do
+ * not track its live transfer. The caller has stopped PAM and proved it idle;
+ * retire the last hardware resource explicitly before disabling the endpoint.
+ */
+static int dwc3_pamu3_end_transfer(struct dwc3_ep *dep)
+{
+	struct dwc3 *dwc = dep->dwc;
+	struct dwc3_gadget_ep_cmd_params params = {};
+	u32 value, index, command;
+	int ret;
+
+	ret = read_poll_timeout_atomic(dwc3_readl, value,
+				       !(value & DWC3_DEPCMD_CMDACT), 1, 1000,
+				       false, dwc, DWC3_DEPCMD(dep->number));
+	if (ret)
+		return ret;
+	command = DWC3_DEPCMD_CMD(value);
+	if (command != DWC3_DEPCMD_STARTTRANSFER &&
+	    command != DWC3_DEPCMD_UPDATETRANSFER)
+		return 0;
+	index = DWC3_DEPCMD_GET_RSC_IDX(value);
+	if (DWC3_DEPCMD_STATUS(value) || !index)
+		return -EIO;
+	/* Orca's DWC_usb3 supports synchronous ENDXFER polling. CMDIOC would
+	 * enqueue a completion into a ring whose PAM consumer is now stopped.
+	 */
+	if (!(dwc3_readl(dwc, DWC3_GUCTL2) & DWC3_GUCTL2_RST_ACTBITLATER))
+		return -EOPNOTSUPP;
+	ret = dwc3_send_gadget_ep_cmd(dep,
+				      DWC3_DEPCMD_ENDTRANSFER |
+					      DWC3_DEPCMD_HIPRI_FORCERM |
+					      DWC3_DEPCMD_PARAM(index),
+				      &params);
+	if (ret)
+		return ret;
+	ret = read_poll_timeout_atomic(dwc3_readl, value,
+				       !(value & DWC3_DEPCMD_CMDACT), 1, 1000,
+				       false, dwc, DWC3_DEPCMD(dep->number));
+	if (ret || DWC3_DEPCMD_STATUS(value))
+		return ret ?: -EIO;
+	dep->resource_index = 0;
+	return 0;
+}
+
+static int dwc3_pamu3_finish(struct device *controller, struct device *owner,
+			     bool release)
+{
+	struct dwc3 *dwc = dev_get_drvdata(controller);
+	unsigned long flags;
+	unsigned int i;
+	u32 count;
+	int ret = 0;
+
+	if (!dwc || !owner)
+		return -EINVAL;
+	spin_lock_irqsave(&dwc->lock, flags);
+	if (dwc->pamu3_owner != owner || !dwc->pamu3_claimed) {
+		ret = -EPERM;
+		goto out;
+	}
+	/* Caller has quiesced PAM. Disable the two exclusively owned endpoints. */
+	for (i = 2; i <= 3; i++) {
+		if (dwc->eps[i]->flags & DWC3_EP_TRANSFER_STARTED) {
+			ret = -EBUSY;
+			goto out;
+		}
+		if (dwc->eps[i]->flags & DWC3_EP_ENABLED) {
+			ret = dwc3_pamu3_end_transfer(dwc->eps[i]);
+			if (ret) {
+				dev_err(dwc->dev,
+					"PAM ep%u ENDTRANSFER failed: %d\n", i,
+					ret);
+				goto out;
+			}
+			ret = __dwc3_gadget_ep_disable(dwc->eps[i]);
+			if (ret)
+				goto out;
+			dwc->eps[i]->endpoint.enabled = false;
+		}
+	}
+	for (i = 1; i <= 2; i++) {
+		dwc3_writel(dwc, DWC3_GEVNTSIZ(i),
+			    DWC3_GEVNTSIZ_INTMASK |
+				    DWC3_GEVNTSIZ_SIZE(
+					    dwc->pamu3_events[i - 1]->length));
+		count = dwc3_readl(dwc, DWC3_GEVNTCOUNT(i));
+		dwc3_writel(dwc, DWC3_GEVNTCOUNT(i), count);
+	}
+	if (release)
+		dwc->pamu3_claimed = false;
+out:
+	spin_unlock_irqrestore(&dwc->lock, flags);
+	return ret;
+}
+int dwc3_pamu3_drain(struct device *controller, struct device *owner)
+{
+	return dwc3_pamu3_finish(controller, owner, false);
+}
+EXPORT_SYMBOL_GPL(dwc3_pamu3_drain);
+
+int dwc3_pamu3_release(struct device *controller, struct device *owner)
+{
+	return dwc3_pamu3_finish(controller, owner, true);
+}
+EXPORT_SYMBOL_GPL(dwc3_pamu3_release);
 
 static struct usb_request *dwc3_gadget_ep_alloc_request(struct usb_ep *ep,
 		gfp_t gfp_flags)
@@ -1989,6 +2164,9 @@ static int __dwc3_gadget_start_isoc(struct dwc3_ep *dep)
 static int __dwc3_gadget_ep_queue(struct dwc3_ep *dep, struct dwc3_request *req)
 {
 	struct dwc3		*dwc = dep->dwc;
+
+	if (dwc3_pamu3_ep_owned(dep))
+		return -EBUSY;
 
 	if (!dep->endpoint.desc || !dwc->pullups_connected || !dwc->connected) {
 		dev_dbg(dwc->dev, "%s: can't queue to disabled endpoint\n",
@@ -2912,11 +3090,11 @@ static irqreturn_t dwc3_thread_interrupt(int irq, void *_dwc);
  *
  * To calculate RxFIFO size we need two numbers:
  * MDWIDTH = size, in bits, of the internal memory bus
- * RAM2_DEPTH = depth, in MDWIDTH, of internal RAM2 (where RxFIFO sits)
+ * RXFIFO_DEPTH = programmed RxFIFO depth, bounded by internal RAM2 depth
  *
  * Given these two numbers, the formula is simple:
  *
- * RxFIFO Size = (RAM2_DEPTH * MDWIDTH / 8) - 24 - 16;
+ * RxFIFO Size = (RXFIFO_DEPTH * MDWIDTH / 8) - 24 - 16;
  *
  * 24 bytes is for 3x SETUP packets
  * 16 bytes is a clock domain crossing tolerance
@@ -2926,6 +3104,8 @@ static irqreturn_t dwc3_thread_interrupt(int irq, void *_dwc);
 static void dwc3_gadget_setup_nump(struct dwc3 *dwc)
 {
 	u32 ram2_depth;
+	u32 rx_fifo_depth;
+	u32 rx_fifo_bytes;
 	u32 mdwidth;
 	u32 nump;
 	u32 reg;
@@ -2933,7 +3113,18 @@ static void dwc3_gadget_setup_nump(struct dwc3 *dwc)
 	ram2_depth = DWC3_GHWPARAMS7_RAM2_DEPTH(dwc->hwparams.hwparams7);
 	mdwidth = dwc3_mdwidth(dwc);
 
-	nump = ((ram2_depth * mdwidth / 8) - 24 - 16) / 1024;
+	/* RAM2 is the available memory, not necessarily the configured FIFO.
+	 * In particular, UDX710 exposes 1160 RAM2 words but programs only 645
+	 * words for RxFIFO. Advertising the whole RAM overstates OUT credits.
+	 * Use the same programmed depth as dwc3_gadget_init_out_endpoint().
+	 */
+	rx_fifo_depth = dwc3_readl(dwc, DWC3_GRXFIFOSIZ(0));
+	if (DWC3_IP_IS(DWC3))
+		rx_fifo_depth = DWC3_GRXFIFOSIZ_RXFDEP(rx_fifo_depth);
+	else
+		rx_fifo_depth = DWC31_GRXFIFOSIZ_RXFDEP(rx_fifo_depth);
+	rx_fifo_bytes = min(ram2_depth, rx_fifo_depth) * (mdwidth / 8);
+	nump = rx_fifo_bytes > 40 ? (rx_fifo_bytes - 40) / 1024 : 0;
 	nump = min_t(u32, nump, 16);
 
 	/* update NumP */
@@ -2960,18 +3151,20 @@ static int __dwc3_gadget_start(struct dwc3 *dwc)
 		dwc3_writel(dwc, DWC3_DEV_IMOD(0), 0);
 	}
 
-	/*
-	 * We are telling dwc3 that we want to use DCFG.NUMP as ACK TP's NUMP
-	 * field instead of letting dwc3 itself calculate that automatically.
-	 *
-	 * This way, we maximize the chances that we'll be able to get several
-	 * bursts of data without going through any sort of endpoint throttling.
+	/* Default to DCFG.NUMP for ACK credits unless the platform selected
+	 * threshold-based receive flow control during core initialization.
 	 */
 	reg = dwc3_readl(dwc, DWC3_GRXTHRCFG);
-	if (DWC3_IP_IS(DWC3))
-		reg &= ~DWC3_GRXTHRCFG_PKTCNTSEL;
-	else
-		reg &= ~DWC31_GRXTHRCFG_PKTCNTSEL;
+	/* core initialization enables threshold-based receive flow control
+	 * when the platform supplies both parameters. Preserve that policy;
+	 * otherwise use the FIFO-bounded DCFG.NUMP default below.
+	 */
+	if (!dwc->rx_thr_num_pkt || !dwc->rx_max_burst) {
+		if (DWC3_IP_IS(DWC3))
+			reg &= ~DWC3_GRXTHRCFG_PKTCNTSEL;
+		else
+			reg &= ~DWC31_GRXTHRCFG_PKTCNTSEL;
+	}
 
 	dwc3_writel(dwc, DWC3_GRXTHRCFG, reg);
 

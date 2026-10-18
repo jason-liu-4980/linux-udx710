@@ -419,6 +419,15 @@ extern void usb_composite_unregister(struct usb_composite_driver *driver);
 		       usb_composite_unregister)
 
 extern void usb_composite_setup_continue(struct usb_composite_dev *cdev);
+/* Opt-in deferred status transaction. defer is called with cdev->lock held by
+ * set_alt; complete is process-context and rejects a superseded SETUP/reset.
+ */
+int usb_composite_setup_defer_checked(struct usb_composite_dev *cdev,
+				      u32 *token);
+int usb_composite_setup_continue_checked(struct usb_composite_dev *cdev,
+					 u32 setup_generation,
+					 const u32 *function_generation,
+					 u32 expected_generation, int status);
 extern int composite_dev_prepare(struct usb_composite_driver *composite,
 		struct usb_composite_dev *cdev);
 extern int composite_os_desc_req_prepare(struct usb_composite_dev *cdev,
@@ -495,6 +504,8 @@ struct usb_composite_dev {
 	 * data/status stages till delayed_status is zero.
 	 */
 	int				delayed_status;
+	u32 setup_generation;
+	bool checked_setup_pending;
 
 	/* protects deactivations and delayed_status counts*/
 	spinlock_t			lock;

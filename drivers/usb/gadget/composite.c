@@ -942,6 +942,8 @@ static void reset_config(struct usb_composite_dev *cdev)
 	}
 	cdev->config = NULL;
 	cdev->delayed_status = 0;
+	cdev->checked_setup_pending = false;
+	cdev->setup_generation++;
 }
 
 static int set_config(struct usb_composite_dev *cdev,
@@ -1764,6 +1766,14 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 	struct usb_function		*f = NULL;
 	struct usb_function		*iter;
 	u8				endp;
+
+	spin_lock(&cdev->lock);
+	cdev->setup_generation++;
+	if (cdev->checked_setup_pending) {
+		cdev->delayed_status = 0;
+		cdev->checked_setup_pending = false;
+	}
+	spin_unlock(&cdev->lock);
 
 	if (w_length > USB_COMP_EP0_BUFSIZ) {
 		if (ctrl->bRequestType & USB_DIR_IN) {
@@ -2757,6 +2767,54 @@ void usb_composite_setup_continue(struct usb_composite_dev *cdev)
 	spin_unlock_irqrestore(&cdev->lock, flags);
 }
 EXPORT_SYMBOL_GPL(usb_composite_setup_continue);
+
+int usb_composite_setup_defer_checked(struct usb_composite_dev *cdev,
+				      u32 *token)
+{
+	lockdep_assert_held(&cdev->lock);
+	/* One opt-in owner per control transfer; ordinary delayed functions
+	 * can still participate through the existing delayed_status counter.
+	 */
+	if (cdev->checked_setup_pending)
+		return -EBUSY;
+	cdev->checked_setup_pending = true;
+	*token = cdev->setup_generation;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(usb_composite_setup_defer_checked);
+
+int usb_composite_setup_continue_checked(struct usb_composite_dev *cdev,
+					 u32 setup_generation,
+					 const u32 *function_generation,
+					 u32 expected_generation, int status)
+{
+	unsigned long flags;
+	int ret = status;
+
+	spin_lock_irqsave(&cdev->lock, flags);
+	if (cdev->setup_generation != setup_generation ||
+	    READ_ONCE(*function_generation) != expected_generation ||
+	    !cdev->checked_setup_pending || !cdev->delayed_status) {
+		ret = -ECANCELED;
+		goto out;
+	}
+	cdev->checked_setup_pending = false;
+	if (status < 0) {
+		/* Stall this transaction; never manufacture a successful status. */
+		cdev->delayed_status = 0;
+		usb_ep_set_halt(cdev->gadget->ep0);
+	} else if (--cdev->delayed_status == 0) {
+		cdev->req->length = 0;
+		cdev->req->context = cdev;
+		ret = composite_ep0_queue(cdev, cdev->req, GFP_ATOMIC);
+		if (ret)
+			usb_ep_set_halt(cdev->gadget->ep0);
+	}
+out:
+	spin_unlock_irqrestore(&cdev->lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(usb_composite_setup_continue_checked);
 
 static char *composite_default_mfr(struct usb_gadget *gadget)
 {

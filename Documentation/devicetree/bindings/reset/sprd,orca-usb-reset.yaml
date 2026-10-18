@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/reset/sprd,orca-usb-reset.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+title: Spreadtrum Orca USB and PAM reset controller
+maintainers:
+  - Jiayong Yang <jiayong.yang@unisoc.com>
+description: |
+  Group 0 is USB0 AP AHB bit 1. Group 1 combines USB1 and PAM IPA AHB bits 0
+  and 5 for PHY/controller startup. Reset 2 pulses only PAM bit 5 for
+  accelerator reinitialization. PAM holds a controller runtime-PM reference
+  and quiesces its DMA before using reset 2.
+properties:
+  compatible:
+    const: sprd,orca-usb-reset
+  '#reset-cells':
+    const: 1
+  sprd,ap-ahb:
+    $ref: /schemas/types.yaml#/definitions/phandle
+  sprd,ipa-ahb:
+    $ref: /schemas/types.yaml#/definitions/phandle
+required: [compatible, '#reset-cells', 'sprd,ap-ahb', 'sprd,ipa-ahb']
+additionalProperties: false

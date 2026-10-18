@@ -19,6 +19,13 @@ struct dwc3;
 #define to_dwc3_ep(ep)		(container_of(ep, struct dwc3_ep, endpoint))
 #define gadget_to_dwc(g)	(dev_get_platdata(&g->dev))
 
+/* Must be evaluated under dwc->lock for endpoint state changes. */
+static inline bool dwc3_pamu3_ep_owned(struct dwc3_ep *dep)
+{
+	return dep->dwc->pamu3_claimed &&
+	       (dep->number == 2 || dep->number == 3);
+}
+
 /* DEPCFG parameter 1 */
 #define DWC3_DEPCFG_INT_NUM(n)		(((n) & 0x1f) << 0)
 #define DWC3_DEPCFG_XFER_COMPLETE_EN	BIT(8)

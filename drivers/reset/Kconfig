@@ -448,3 +448,10 @@ source "drivers/reset/sti/Kconfig"
 source "drivers/reset/tegra/Kconfig"
 
 endif
+
+config RESET_SPRD_ORCA_USB
+	bool "Spreadtrum Orca USB shared reset groups"
+	depends on OF && (ARCH_SPRD || COMPILE_TEST)
+	select MFD_SYSCON
+	help
+	  Pulse the USB0 and USB1/PAM reset groups on Spreadtrum Orca (UDX710).

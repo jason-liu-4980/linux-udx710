@@ -1226,6 +1226,13 @@ struct dwc3 {
 	struct resource		xhci_resources[DWC3_XHCI_RESOURCES_NUM];
 
 	struct dwc3_event_buffer *ev_buf;
+	/* Optional Orca PAM buffers are never consumed by event-0 IRQ code. */
+	struct dwc3_event_buffer *pamu3_events[2];
+	struct device *pamu3_owner;
+	phys_addr_t pamu3_regs_phys;
+	u32 pamu3_generation;
+	bool pamu3_capable;
+	bool pamu3_claimed;
 	struct dwc3_ep		*eps[DWC3_ENDPOINTS_NUM];
 
 	struct usb_gadget	*gadget;

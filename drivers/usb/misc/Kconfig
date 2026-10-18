@@ -359,3 +359,17 @@ config USB_ONBOARD_DEV_USB5744
 	  during hub start-up configuration stage. It is must to enable this
 	  option on AMD Kria KR260 Robotics Starter Kit as this hub is
 	  connected to USB-SD converter which mounts the root filesystem.
+
+config SPRD_PAMU3
+	bool "UDX710 PAMU3 checked offload"
+	depends on ARM64 && OF && EXPERT && !OF_DYNAMIC
+	depends on USB_DWC3=y && (USB_DWC3_GADGET=y || USB_DWC3_DUAL_ROLE=y) && SPRD_SIPA=y
+	depends on COMMON_CLK && RESET_CONTROLLER
+	help
+	  Dedicated event1/2, ep2-OUT/ep3-IN ownership, real RM/FIFO enable
+	  and checked DMA teardown. Requires the SIPA checked PAM lifecycle.
+	  The provider implements the captured MBIM NTB16/IPS0 template;
+	  a mainline MBIM function/control-plane adapter is still required.
+	  RNDIS exposes an opt-in configfs pamu3 attribute and deferred USB
+	  lifecycle, with single-packet framing and the SIPA Ethernet backend.
+	  Unsupported IOMMU/nonidentity DMA and ECM framing are refused.
