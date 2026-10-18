@@ -82,6 +82,7 @@ $(obj)/vdso32-wrap.o: $(obj)/vdso32/vdso.so
 
 obj-y					+= probes/
 obj-y					+= head.o
+obj-$(CONFIG_ARCH_SPRD)			+= udx710-trial.o
 always-$(KBUILD_BUILTIN)		+= vmlinux.lds
 
 ifeq ($(CONFIG_DEBUG_EFI),y)
