@@ -19,12 +19,14 @@ u8 sprd_mux_helper_get_parent(const struct sprd_clk_common *common,
 	int num_parents;
 	int i;
 
-	regmap_read(common->regmap, common->reg, &reg);
+	if (regmap_read(common->regmap, common->reg, &reg))
+		return (u8)-1;
 	parent = reg >> mux->shift;
 	parent &= (1 << mux->width) - 1;
 
 	if (!mux->table)
-		return parent;
+		return parent < clk_hw_get_num_parents(&common->hw) ? parent :
+								      (u8)-1;
 
 	num_parents = clk_hw_get_num_parents(&common->hw);
 
@@ -47,17 +49,19 @@ int sprd_mux_helper_set_parent(const struct sprd_clk_common *common,
 			       const struct sprd_mux_ssel *mux,
 			       u8 index)
 {
-	unsigned int reg;
+	unsigned int select;
 
-	if (mux->table)
-		index = mux->table[index];
-
-	regmap_read(common->regmap, common->reg, &reg);
-	reg &= ~GENMASK(mux->width + mux->shift - 1, mux->shift);
-	regmap_write(common->regmap, common->reg,
-			  reg | (index << mux->shift));
-
-	return 0;
+	if (mux->read_only)
+		return -EOPNOTSUPP;
+	if (index >= clk_hw_get_num_parents(&common->hw))
+		return -EINVAL;
+	select = mux->table ? mux->table[index] : index;
+	if (select >= BIT(mux->width))
+		return -EINVAL;
+	return regmap_update_bits(common->regmap, common->reg,
+				  GENMASK(mux->width + mux->shift - 1,
+					  mux->shift),
+				  select << mux->shift);
 }
 EXPORT_SYMBOL_GPL(sprd_mux_helper_set_parent);
 

@@ -9,6 +9,15 @@ if SPRD_COMMON_CLK
 
 # SoC Drivers
 
+config SPRD_ORCA_CLK
+	tristate "Support for the Spreadtrum Orca clocks"
+	depends on (ARM64 && ARCH_SPRD) || COMPILE_TEST
+	help
+	  Support for the clock controllers on Spreadtrum Orca (UDX710),
+	  including the nine public clock domains, SP-AHB gate and Orca PLL
+	  programming.
+
+
 config SPRD_SC9860_CLK
 	tristate "Support for the Spreadtrum SC9860 clocks"
 	depends on (ARM64 && ARCH_SPRD) || COMPILE_TEST

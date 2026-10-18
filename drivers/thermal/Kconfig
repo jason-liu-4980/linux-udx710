@@ -530,4 +530,13 @@ config LOONGSON2_THERMAL
 	  is higher than the high temperature threshold or lower than the low
 	  temperature threshold, the interrupt will occur.
 
+
 endif
+
+config SPRD_ORCA_AGGREGATE_THERMAL
+	tristate "Orca aggregate cluster and SoC temperature"
+	depends on OF && THERMAL_OF && SPRD_THERMAL
+	help
+	  Provide virtual aggregate cluster and SoC thermal sensors on
+	  Spreadtrum Orca (UDX710) using maximum/mean aggregation across
+	  constituent thermal zones.

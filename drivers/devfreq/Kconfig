@@ -75,6 +75,19 @@ config DEVFREQ_GOV_PASSIVE
 
 comment "DEVFREQ Drivers"
 
+config ARM_SPRD_ORCA_DDR_DEVFREQ
+	tristate "Spreadtrum Orca PM_SYS DDR frequency scaling"
+	depends on ARM64 && OF && SPRD_SIPC_V2
+	depends on DEVFREQ_GOV_USERSPACE = y
+	help
+	  Query the retained PM_SYS firmware's DDR frequency table and expose
+	  its real current frequency through devfreq. Explicit frequency
+	  requests become AP votes, arbitrated with CP demand by firmware.
+	  Firmware automatic scaling is preserved; no AP polling governor
+	  or direct memory-controller clock/voltage programming is used.
+	  The userspace governor must be built in: PM_SYS only acknowledges
+	  the first OPEN on its DDR channel during each firmware boot.
+
 config ARM_EXYNOS_BUS_DEVFREQ
 	tristate "ARM Exynos Generic Memory Bus DEVFREQ Driver"
 	depends on ARCH_EXYNOS || COMPILE_TEST

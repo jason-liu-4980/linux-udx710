@@ -10,6 +10,20 @@
 
 #include "common.h"
 
+/* Legacy PLLs use implicit bias indices and a 10 MHz integer multiplier. */
+enum sprd_pll_rate_mode {
+	SPRD_PLL_RATE_LEGACY,
+	SPRD_PLL_RATE_INTEGER_FRACTIONAL,
+};
+
+#define SPRD_PLL_IBIAS_INVALID 0xff
+#define SPRD_PLL_FREQ_INVALID 0xffffffff
+
+struct sprd_pll_freq_table {
+	u32 ibias;
+	u64 max_freq;
+};
+
 struct reg_cfg {
 	u32 val;
 	u32 msk;
@@ -51,6 +65,8 @@ enum {
 struct sprd_pll {
 	u32 regs_num;
 	const u64 *itable;
+	const struct sprd_pll_freq_table *ftable;
+	enum sprd_pll_rate_mode rate_mode;
 	const struct clk_bit_field *factors;
 	u16 udelay;
 	u16 k1;
@@ -114,6 +130,41 @@ struct sprd_pll {
 	SPRD_PLL_HW_INIT_FN(_struct, _name, _parent, _reg, _regs_num,	\
 			    _itable, _factors, _udelay, _k1, _k2,	\
 			    _fflag, _fvco, CLK_HW_INIT_HW)
+
+#define SPRD_PLL_WITH_FTABLE_K_FVCO(_struct, _name, _parent, _reg, _regs_num, \
+				    _ftable, _factors, _udelay, _k1, _k2,     \
+				    _fflag, _fvco)                            \
+	struct sprd_pll _struct = {					\
+		.rate_mode	= SPRD_PLL_RATE_INTEGER_FRACTIONAL,	\
+		.regs_num	= _regs_num,				\
+		.ftable		= _ftable,				\
+		.factors	= _factors,				\
+		.udelay		= _udelay,				\
+		.k1		= _k1,					\
+		.k2		= _k2,					\
+		.fflag		= _fflag,				\
+		.fvco		= _fvco,				\
+		.common		= {					\
+			.regmap		= NULL,				\
+			.reg		= _reg,				\
+			.hw.init	= CLK_HW_INIT(_name,		\
+						      _parent,		\
+						      &sprd_pll_ops,	\
+						      0),		\
+		},							\
+	}
+
+#define SPRD_PLL_WITH_FTABLE_K(_struct, _name, _parent, _reg, _regs_num,      \
+			       _ftable, _factors, _udelay, _k1, _k2)          \
+	SPRD_PLL_WITH_FTABLE_K_FVCO(_struct, _name, _parent, _reg, _regs_num, \
+				    _ftable, _factors, _udelay, _k1, _k2, 0,  \
+				    0)
+
+#define SPRD_PLL_WITH_FTABLE_1K(_struct, _name, _parent, _reg, _regs_num,      \
+				_ftable, _factors, _udelay)                    \
+	SPRD_PLL_WITH_FTABLE_K_FVCO(_struct, _name, _parent, _reg, _regs_num,  \
+				    _ftable, _factors, _udelay, 1000, 1000, 0, \
+				    0)
 
 static inline struct sprd_pll *hw_to_sprd_pll(struct clk_hw *hw)
 {

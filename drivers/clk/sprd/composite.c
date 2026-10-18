@@ -30,6 +30,8 @@ static int sprd_comp_set_rate(struct clk_hw *hw, unsigned long rate,
 {
 	struct sprd_comp *cc = hw_to_sprd_comp(hw);
 
+	if (cc->mux.read_only)
+		return -EOPNOTSUPP;
 	return sprd_div_helper_set_rate(&cc->common, &cc->div,
 				       rate, parent_rate);
 }

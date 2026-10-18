@@ -273,3 +273,13 @@ config ARM_PXA2xx_CPUFREQ
 	  This add the CPUFreq driver support for Intel PXA2xx SOCs.
 
 	  If in doubt, say N.
+
+config ARM_SPRD_ORCA_SIP_CPUFREQ
+	tristate "Spreadtrum Orca secure-firmware CPU frequency scaling"
+	depends on ARM64 && OF && HAVE_ARM_SMCCC
+	depends on ARCH_SPRD || COMPILE_TEST
+	select PM_OPP
+	help
+	  Support CPU frequency scaling on Spreadtrum Orca (UDX710) via the
+	  secure SIP DVFS service for OPP discovery and index-based
+	  clock/voltage transitions.

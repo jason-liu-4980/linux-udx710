@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/cpufreq/sprd,orca-cpufreq.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Spreadtrum Orca secure-firmware CPU DVFS interface
+
+maintainers:
+  - Orson Zhai <orsonzhai@gmail.com>
+  - Baolin Wang <baolin.wang7@gmail.com>
+
+description: |
+  The Orca AP CPU frequency driver obtains its CPU OPP frequency/voltage pairs
+  through the secure SIP DVFS service (SMC32 fast calls 0x82000200..207).
+  This is not the public BSP sprd,orca-cpudvfs MMIO interface. No reg or static
+  operating-points property is required on this node. The secure firmware
+  retained from the stock boot chain owns regulator and clock sequencing.
+
+  Each CPU references its cluster parameter node with the legacy
+  cpufreq-data-v1 phandle. The existing supported cluster0 parameter node
+  provides voltage-step in microvolts, tuning-latency-us, and boost-duration
+  equal to zero. The supplied board uses 750000, 200, and 0 respectively.
+  These are firmware request parameters, not a CPU voltage OPP table.
+  The driver obtains all actual frequency/voltage pairs from firmware.
+
+properties:
+  compatible:
+    const: sprd,orca-cpufreq
+
+required:
+  - compatible
+
+additionalProperties: false
+
+examples:
+  - |
+    cpufreq {
+        compatible = "sprd,orca-cpufreq";
+    };
+...

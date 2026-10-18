@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/thermal/sprd,orca-aggregate-thermal.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Spreadtrum Orca cluster and SoC aggregate temperature sensors
+
+maintainers:
+  - Orson Zhai <orsonzhai@gmail.com>
+  - Baolin Wang <baolin.wang7@gmail.com>
+
+description: |
+  Legacy Orca board descriptions name the input thermal zones. If any input
+  reaches 30000 millicelsius the output is the maximum input; otherwise the
+  output is their arithmetic mean truncated towards zero. Cluster aggregates
+  may consume only sprd,orca-thermal sensors and SoC aggregates may consume
+  only sprd,cluster0-thermal providers. This enforces an acyclic dependency.
+
+  Sensor IDs are specified by the consuming thermal-zone's thermal-sensors
+  argument, not guessed from a unit address. The existing board uses ID15
+  for cluster0 and ID17 for SoC. Legacy PID fields may remain for reference;
+  this temperature provider does not implement a power/energy model or
+  implicitly select the power_allocator governor.
+
+properties:
+  compatible:
+    enum:
+      - sprd,cluster0-thermal
+      - sprd,soc-thermal
+  "#thermal-sensor-cells":
+    const: 1
+  sensor-names:
+    $ref: /schemas/types.yaml#/definitions/string-array
+    minItems: 1
+    maxItems: 16
+    uniqueItems: true
+    description: Names of enabled child nodes below /thermal-zones.
+  k-po:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    deprecated: true
+  k-pu:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    deprecated: true
+  k-i:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    deprecated: true
+  k-d:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    deprecated: true
+  cutoff:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    deprecated: true
+
+required:
+  - compatible
+  - "#thermal-sensor-cells"
+  - sensor-names
+additionalProperties: false
+...

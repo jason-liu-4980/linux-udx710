@@ -14,6 +14,7 @@
  * struct sprd_mux_ssel - Mux clock's source select bits in its register
  * @shift: Bit offset of the divider in its register
  * @width: Width of the divider field in its register
+ * @read_only: The source selection must not be changed without a proven contract
  * @table: For some mux clocks, not all sources are used on some special
  *	   chips, this matches the value of mux clock's register and the
  *	   sources which are used for this mux clock
@@ -22,6 +23,7 @@ struct sprd_mux_ssel {
 	u8		shift;
 	u8		width;
 	const u8	*table;
+	bool read_only;
 };
 
 struct sprd_mux {
@@ -69,6 +71,16 @@ struct sprd_mux {
 			  _shift, _width, _flags)			\
 	SPRD_MUX_CLK_DATA_TABLE(_struct, _name, _parents, NULL,		\
 				_reg, _shift, _width, _flags)
+
+/* Keep readback while refusing writes for unresolved shared/parent controls. */
+#define SPRD_MUX_CLK_READ_ONLY(_struct, _name, _parents, _reg, _shift, _width,  \
+			       _flags)                                          \
+	struct sprd_mux _struct = {                                             \
+		.mux = { .shift = _shift, .width = _width, .read_only = true }, \
+		.common = { .reg = _reg,                                        \
+			    .hw.init = CLK_HW_INIT_PARENTS(                     \
+				    _name, _parents, &sprd_mux_ops, _flags) }   \
+	}
 
 static inline struct sprd_mux *hw_to_sprd_mux(const struct clk_hw *hw)
 {

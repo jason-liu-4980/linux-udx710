@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/clock/sprd,orca-clk.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Spreadtrum Orca clock controllers
+
+maintainers:
+  - Orson Zhai <orsonzhai@gmail.com>
+  - Baolin Wang <baolin.wang7@gmail.com>
+  - Chunyan Zhang <zhang.lyra@gmail.com>
+
+description: |
+  Clock controllers for the nine public Orca providers and the SP-AHB
+  provider on Spreadtrum Orca (UDX710). The SP-AHB provider exposes clock
+  ID 0, the SP UART0 gate. IDs are defined in
+  dt-bindings/clock/sprd,orca-clk.h.
+
+  The SP-AHB controller has a 0x3000-byte register window. Its UART gate
+  uses bit 9 at offset 0, with set and clear aliases at offsets 0x1000
+  and 0x2000. Preserve unused-clock state because firmware may also use
+  this domain. Registering this provider does not establish UART interrupt
+  ownership or implement the pmsys notification protocol.
+
+  The current port retains global CCF parent-name lookup. The supplied board
+  uses roots named ext-26m, ext-32k and rco-100m. The clocks property records
+  the BSP connection but is not a generic replacement for those name-based
+  dependencies. An arbitrary differently named clock phandle is not enough.
+  clk-12m remains unresolved for two AON USB reference mux inputs. See the
+  source guards for controls that are registered but not safe to program.
+
+properties:
+  compatible:
+    enum:
+      - sprd,orca-pmu-gate
+      - sprd,orca-g3-pll
+      - sprd,orca-apcpu-clk
+      - sprd,orca-apahb-gate
+      - sprd,orca-ap-clk
+      - sprd,orca-apapb-gate
+      - sprd,orca-ipa-gate
+      - sprd,orca-spahb-gate
+      - sprd,orca-aon-clk
+      - sprd,orca-aon-gate
+
+  reg:
+    maxItems: 1
+
+  sprd,syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Syscon that owns the controller registers.
+
+  clocks:
+    maxItems: 1
+    description: Board 26 MHz reference; current driver retains CCF name lookup.
+
+  '#clock-cells':
+    const: 1
+
+required:
+  - compatible
+  - clocks
+  - '#clock-cells'
+
+oneOf:
+  - required: [reg]
+  - required: [sprd,syscon]
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: sprd,orca-spahb-gate
+    then:
+      required: [reg]
+      properties:
+        sprd,syscon: false
+
+additionalProperties: false
+
+examples:
+  - |
+    clock-controller@21100000 {
+        compatible = "sprd,orca-ap-clk";
+        reg = <0x21100000 0x1000>;
+        clocks = <&ext_26m>;
+        #clock-cells = <1>;
+    };
+...
