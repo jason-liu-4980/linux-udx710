@@ -1,0 +1,41 @@
+What:           /sys/class/spipe/<name>/session
+Date:           October 2026
+Contact:        UDX710 AP-side port maintainers
+Description:
+                Read-only ASCII line: "1 dst channel generation state\n".
+                Values are decimal u32; version is currently 1. Generation
+                is the driver's SBUF software generation, wrapping at 2^32.
+                State 0 means idle/unready, 1 means the SBUF transport handshake
+                is ready, and 2 means stopping. This is not CP authentication,
+                HALO, SIM, registration or data-session readiness. Reads only
+                snapshot existing software fields under state_lock; they do not
+                consume SMSG/SBUF, inspect MMIO, or change any state.
+                All character nodes on one channel report the same snapshot.
+                The fixed UDX710 PSCP nodes are spipe_lte2 (dst5/channel4),
+                stty_lte0 (dst5/channel6), and snv_lte (dst5/channel40).
+                A userspace owner may arm a baseline after observing state1;
+                then any generation difference (equality comparison, not order),
+                state loss, read error or malformed record invalidates its old
+                descriptors. Close/reopen alone does not prove SIPA DMA drain.
+
+What:           /sys/bus/platform/devices/89600000.sipa-dele/cp_session
+Date:           October 2026
+Contact:        UDX710 AP-side port maintainers
+Description:
+                Read-only ASCII line:
+                "1 dst channel generation connected restart_blocked error\n".
+                The first six fields are decimal u32; error is signed decimal
+                errno (zero or negative). dst/channel identify the selected CP
+                delegator (UDX710 PSCP dst5, SIPA channel120). The software epoch,
+                connected and restart_blocked fields are sampled under the
+                existing delegator lock, with the sticky atomic error sampled
+                within that interval. No transport messages or MMIO are read.
+                connected reports the AP control-channel state, not a hardware
+                grant or network-ready result. restart_blocked or nonzero error
+                requires stopping dependent user processes and the documented
+                cold-machine recovery, without attempting CP-only restart.
+                Before the first connected observation, generation can change
+                during initial handshake. After a baseline is armed, a changed
+                generation or lost connection invalidates the observed session.
+                The sysfs file disappears on provider removal; this is an error,
+                never a reset-to-zero or newly authenticated session.

@@ -1,0 +1,4 @@
+menu "UDX710 AP packet transport"
+source "drivers/staging/sprd/sipa/Kconfig"
+source "drivers/staging/sprd/sipa_delegate/Kconfig"
+endmenu

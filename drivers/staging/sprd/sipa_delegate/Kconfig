@@ -1,0 +1,9 @@
+config SPRD_SIPA_DELEGATE
+	bool "UDX710 local CP SIPA resource protocol"
+	depends on SPRD_SIPA && SPRD_SIPC_V2
+	default y
+
+config SPRD_SIPA_DELE_CP_IN_MINIAP
+	bool
+	depends on SPRD_SIPA_DELEGATE
+	default y

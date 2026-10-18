@@ -1,0 +1,50 @@
+
+menu "SIPA modules"
+
+config SPRD_SIPA
+	bool "UDX710 SIPA AP packet transport"
+	depends on NET && INET && OF && HAS_IOMEM
+	select MFD_SYSCON
+	default n
+	help
+	  SIPA is a module for spreadtrum ip packet accelator driver.
+
+config SPRD_SIPA_USB_ACCEL
+	bool "Vendor SIPA USB gadget acceleration"
+	depends on SPRD_SIPA && USB_GADGET
+	default y
+	help
+	  Preserve the existing vendor USB/PAMU3 acceleration path by default.
+	  A diagnostic software profile may explicitly disable this option.
+	  Keeping this disabled leaves the generic gether USB path intact,
+	  while retaining SIPA cellular netdevs and the CP resource protocol.
+	  This does not replace the SIPA modem packet transport with USB.
+
+config SPRD_SIPA_WCN
+	bool "Enable sipa for WCN"
+	default n
+	depends on SPRD_SIPA
+	help
+	  This option enables sipa interface for WCN.
+
+config SPRD_IPA_PCIE_WORKROUND
+	bool "Enable ipa pcie workround"
+	default n
+	depends on SPRD_SIPA
+	help
+	  This option enables sipa pcie workround.
+          Orca ipa hardware limitations:
+	  the sipc share memory must map from
+	  0x280000000(orca side) to 0x80000000(roc1 side),
+	  and the size must be 256M
+
+config SPRD_SIPA_NF_FLOWTABLE
+	bool "SIPA nft flowtable offload adapter"
+	depends on SPRD_SIPA && NF_FLOW_TABLE && NET_CLS_ACT && EXPERT
+	depends on ARM64 && !CPU_BIG_ENDIAN
+	default n
+	help
+	  TC_SETUP_FT integration, IPv4/IPv6 TCP/UDP rule translation and
+	  SIPA descriptor/DMA table construction.
+
+endmenu
