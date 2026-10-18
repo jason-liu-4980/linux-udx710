@@ -4,3 +4,4 @@ dtb-$(CONFIG_ARCH_SPRD) += sc9836-openphone.dtb \
 			sp9863a-1h10.dtb	\
 			ums512-1h10.dtb		\
 			ums9620-2h10.dtb
+dtb-$(CONFIG_ARCH_SPRD) += udx710-sy108.dtb udx710-sy108-recovery.dtb

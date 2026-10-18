@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#include "udx710.dtsi"
+#include "udx710-sy108-pmic.dtsi"
+#include "udx710-sy108-thermal.dtsi"
+/ { model = "SY108 UDX710 CPE"; compatible = "sprd,sy108", "sprd,udx710"; };
+
+/* Board devices shared by direct-root OpenWrt and the independent RAM Recovery. */
+#include "udx710-sy108-unused.dtsi"
+
+&{/chosen} {
+ bootargs = "console=ttyS0,115200n8 earlycon loglevel=7 rdinit=/init";
+ udx,trial-rtc-stages;
+ udx,trial-stage-schema = <6>;
+ udx,trial-local-lease;
+};
+
+&pcc { status = "disabled"; };
+&p182 { /delete-property/ sprd,pamu3-offload; };
+&{/soc/ipa/pcie0@2b100000} { status = "disabled"; };
+
+/* Orca selector 3: 195 MHz 2x, retaining the qualified 307.2 MHz ECC source. */
+&{/soc/ap-ahb/nand-controller@21300000} {
+ status = "okay";
+ clocks = <&p3 0x2e &p4 0x2 &p5 0x1 &p5 0xe
+           &p2 0x1 &p2 0x2 &p2 0x3 &p6 0x69 &p6 0x6a>;
+};
+
+#include "udx710-sy108-mcu.dtsi"
+/* Linux owns all MTD partitions for in-system maintenance. */
+&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@0} {
+ /delete-property/ read-only;
+};
+&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@40000} {
+ /delete-property/ read-only;
+};
+&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@180000} {
+ /delete-property/ read-only;
+};
+&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@240000} {
+ /delete-property/ read-only;
+};
+&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@260000} {
+ /delete-property/ read-only;
+};
+&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@3a0000} {
+ /delete-property/ read-only;
+};
+&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@460000} {
+ /delete-property/ read-only;
+};
+&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@480000} {
+ /delete-property/ read-only;
+};
+/* Board-used MCU UART; the SoC provides its clocks and PM interrupt proxy. */
+&{/aliases} {
+ serial1 = "/soc/aon/serial@620e0000";
+};
+&p16 {
+ status = "okay";
+};
+&{/soc/aon/serial@620e0000} {
+ status = "okay";
+};
+/* DDR firmware queries require a running PM_SYS transport. */
+&{/scene-frequency} {
+ status = "okay";
+};
+/* Load the board's PM firmware before opening MCU/DDR/baseband services.
+ * The SIPC endpoint releases CM4 only after its mailbox receiver exists. */
+&pmsys {
+ sprd,firmware-volume = "nr_pmsys";
+ status = "okay";
+};
+&{/sipc@0} {
+ sprd,pm-sys = <&pmsys>;
+};

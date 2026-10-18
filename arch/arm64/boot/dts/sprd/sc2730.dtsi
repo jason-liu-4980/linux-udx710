@@ -1,0 +1,257 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* SC2730 chip contents. Include inside a board-created PMIC bus node.
+ * Bus address/IRQ wiring, SoC hwspinlocks, rail constraints and consumers
+ * belong to the board integration, not to this chip description. */
+compatible = "sprd,sc2730";
+interrupt-controller;
+#interrupt-cells = <0x1>;
+#address-cells = <0x1>;
+#size-cells = <0x0>;
+
+led-controller@180 {
+	compatible = "sprd,sc2730-bltc";
+	#address-cells = <0x1>;
+	#size-cells = <0x0>;
+	reg = <0x180>;
+	led@0 {
+		reg = <0x0>;
+	};
+	led@1 {
+		reg = <0x1>;
+	};
+	led@2 {
+		reg = <0x2>;
+	};
+};
+
+rtc@200 {
+	compatible = "sprd,sc2730-rtc", "sprd,sc2731-rtc";
+	reg = <0x200>;
+	interrupt-parent = <&sc2730>;
+	interrupts = <0x1>;
+};
+
+sc2730_eic: pbd: gpio@280 {
+	compatible = "sprd,sc2730-eic", "sprd,sc2731-eic";
+	reg = <0x280>;
+	interrupt-parent = <&sc2730>;
+	interrupts = <0x4>;
+	gpio-controller;
+	#gpio-cells = <0x2>;
+	interrupt-controller;
+	#interrupt-cells = <0x2>;
+	phandle = <0xbd>;
+};
+
+efuse@300 {
+	compatible = "sprd,sc27xx-efuse", "sprd,sc2730-efuse";
+	reg = <0x300>;
+	#address-cells = <0x1>;
+	#size-cells = <0x1>;
+	pbb: calib@0 {
+		reg = <0x24 0x2>;
+		phandle = <0xbb>;
+	};
+	pbc: calib@1 {
+		reg = <0x26 0x2>;
+		phandle = <0xbc>;
+	};
+	pc2: calib@2 {
+		reg = <0x2 0x2>;
+		phandle = <0xc2>;
+	};
+	pc1: calib@6 {
+		reg = <0x6 0x2>;
+		phandle = <0xc1>;
+	};
+	pc3: calib@1e {
+		reg = <0x1e 0x2>;
+		phandle = <0xc3>;
+	};
+	pbe: calib@3 {
+		reg = <0x6 0x2>;
+		phandle = <0xbe>;
+	};
+	pb9: calib@d {
+		reg = <0x1a 0x2>;
+		phandle = <0xb9>;
+	};
+	pc4: calib@20 {
+		reg = <0x20 0x2>;
+		phandle = <0xc4>;
+	};
+	pc5: calib@22 {
+		reg = <0x22 0x2>;
+		phandle = <0xc5>;
+	};
+	pba: calib@14 {
+		reg = <0x28 0x2>;
+		phandle = <0xba>;
+	};
+	p107: calib@16 {
+		reg = <0x2c 0x2>;
+		phandle = <0x107>;
+	};
+};
+
+pc0: typec@380 {
+	compatible = "sprd,sc27xx-typec", "sprd,sc2730-typec";
+	interrupt-parent = <&sc2730>;
+	interrupts = <0x8>;
+	reg = <0x380>;
+	nvmem-cells = <&pb9>;
+	nvmem-cell-names = "cc_calib";
+	phandle = <0xc0>;
+};
+
+fchg@400 {
+	compatible = "sprd,sc27xx-fast-chg", "sprd,sc2730-fast-charger";
+	reg = <0x400>;
+	interrupt-parent = <&sc2730>;
+	interrupts = <0x5>;
+	nvmem-cell-names = "fchg_cur_calib";
+	nvmem-cells = <&pba>;
+};
+
+sc2730_adc: pbf: adc@504 {
+	compatible = "sprd,sc27xx-adc", "sprd,sc2730-adc";
+	reg = <0x504>;
+	interrupt-parent = <&sc2730>;
+	interrupts = <0x0>;
+	#io-channel-cells = <0x1>;
+	nvmem-cells = <&pbb &pbc>;
+	nvmem-cell-names = "big_scale_calib", "small_scale_calib";
+	phandle = <0xbf>;
+};
+
+fgu@c00 {
+	compatible = "sprd,sc27xx-fgu", "sprd,sc2730-fgu";
+	reg = <0xc00>;
+	nvmem-cell-names = "fgu_calib";
+	nvmem-cells = <&pbe>;
+	interrupt-parent = <&sc2730>;
+	interrupts = <0x3>;
+};
+
+pd@e00 {
+	compatible = "sprd,sc27xx-pd", "sprd,sc2730-pd";
+	reg = <0xe00 0x380>;
+	interrupt-parent = <&sc2730>;
+	interrupts = <0x9>;
+	nvmem-cells = <&pc1 &pc2 &pc3 &pb9>;
+	nvmem-cell-names = "pdrc_calib", "pddelta_calib", "pdref_calib", "cc_calib";
+};
+
+audio-codec@1000 {
+	compatible = "sprd,sc2730-audio-codec", "sprd,sc27xx-audio-codec";
+	#sound-dai-cells = <0x1>;
+	reg = <0x1000>;
+	nvmem-cells = <&pc4 &pc5 &pbe>;
+	nvmem-cell-names = "aud_pabst_vcal_efuse", "neg_cp_efuse", "fgu_4p2_efuse";
+};
+
+syscon@1800 {
+	compatible = "sprd,sc27xx-syscon";
+	reg = <0x1800 0x1ba0 0x1b98>;
+};
+
+poweroff@1820 {
+	compatible = "sprd,sc2730-poweroff";
+	reg = <0x1820>;
+};
+
+tsensor@1b34 {
+	compatible = "sprd,sc27xx-tsensor", "sprd,sc2730-tsensor";
+	#thermal-sensor-cells = <0x1>;
+	reg = <0x1b34>;
+	osc-tsensor@0 {
+		reg = <0x0>;
+	};
+	tout-tsensor@1 {
+		reg = <0x1>;
+	};
+};
+
+led-controller@1b88 {
+	compatible = "sprd,sc27xx-keypad-led", "sprd,sc2730-keypad-led";
+	reg = <0x1b88 0x1b8c>;
+};
+
+vibrator@1b90 {
+	compatible = "sprd,sc2730-vibrator";
+	reg = <0x1b90>;
+};
+
+hw_reset@1bc0 {
+	compatible = "sprd,sc27xx-7sreset", "sprd,sc2730-7sreset";
+	reg = <0x1bf8 0x1bc0>;
+};
+
+regulators {
+	dcdc-cpu {
+	};
+	dcdc-gpu {
+	};
+	dcdc-core {
+	};
+	dcdc-modem {
+	};
+	dcdc-mem {
+	};
+	dcdc-memq {
+	};
+	dcdc-gen0 {
+	};
+	dcdc-gen1 {
+	};
+	dcdc-sram {
+	};
+	ldo-avdd18 {
+	};
+	ldo-vddrf18 {
+	};
+	ldo-vddcamio {
+	};
+	ldo-vddwcn {
+	};
+	ldo-vddcamd1 {
+	};
+	ldo-vddcamd0 {
+	};
+	ldo-vddrf1v25 {
+	};
+	ldo-avdd12 {
+	};
+	ldo-vddcama0 {
+	};
+	ldo-vddcama1 {
+	};
+	ldo-vddcammot {
+	};
+	ldo-vddsim2 {
+	};
+	p7: ldo-vddemmccore {
+		phandle = <0x7>;
+	};
+	ldo-vddsdcore {
+	};
+	ldo-vddsdio {
+	};
+	ldo-vdd28 {
+	};
+	ldo-vddwifipa {
+	};
+	ldo-vdd18-dcxo {
+	};
+	pd1: ldo-vddusb33 {
+		phandle = <0xd1>;
+	};
+	ldo-vddldo0 {
+	};
+	ldo-vddldo1 {
+	};
+	ldo-vddldo2 {
+	};
+	ldo-vddkpled {
+	};
+};

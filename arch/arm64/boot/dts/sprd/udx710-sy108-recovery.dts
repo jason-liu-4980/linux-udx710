@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* Independent SY108 RAM Recovery. */
+/dts-v1/;
+#include "udx710-sy108.dtsi"
+#include "udx710-sy108-recovery-services.dtsi"
+&{/chosen} {
+	udx,recovery-ram;
+	udx,boot-policy = "openwrt-v1";
+	udx,boot-target = "recovery";
+};

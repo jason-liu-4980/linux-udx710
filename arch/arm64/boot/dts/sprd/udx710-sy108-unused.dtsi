@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* 4H10 product policy: eMMC/SDIO and MIPI peripherals are not used.
+ * Keep the recovered reference description intact. There are no separate
+ * CSI camera or DSI display controller nodes in that description; the three
+ * modem-debug outputs below are its MIPI DPHY/DSI consumers. Shared clock,
+ * syscon and PMIC providers retain their other firmware/board consumers.
+ */
+&{/soc/ap-ahb/sdio@26100000} {
+	status = "disabled";
+};
+
+&{/soc/aon/modem-dbg-log@63610000} {
+	status = "disabled";
+};
+
+&{/soc/aon/modem-dbg-log@63620000} {
+	status = "disabled";
+};
+
+&{/soc/aon/modem-dbg-log@63630000} {
+	status = "disabled";
+};
+
+&{/soc/ipa/usb3@21400000} { status = "disabled"; };
+&{/soc/ipa/usb3@21400000/dwc3@21400000} { status = "disabled"; };
+&pc7 { status = "disabled"; };

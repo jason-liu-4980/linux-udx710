@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* UDX710 ADI controller hardware; PMIC selection is board-specific. */
+&{/soc/aon} {
+	udx710_adi: spi@63a00000 {
+		compatible = "sprd,orca-adi";
+		reg = <0x0 0x63a00000 0x0 0x200000>;
+		#address-cells = <0x1>;
+		#size-cells = <0x0>;
+		status = "disabled";
+	};
+};
