@@ -71,3 +71,5 @@ nand-objs += nand_micron.o
 nand-objs += nand_sandisk.o
 nand-objs += nand_samsung.o
 nand-objs += nand_toshiba.o
+
+obj-$(CONFIG_MTD_NAND_SPRD_ORCA) += sprd-orca-nand.o

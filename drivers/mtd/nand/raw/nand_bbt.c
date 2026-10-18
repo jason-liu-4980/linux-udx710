@@ -127,6 +127,14 @@ static int check_pattern(uint8_t *buf, int len, int paglen, struct nand_bbt_desc
  */
 static int check_short_pattern(uint8_t *buf, struct nand_bbt_descr *td)
 {
+	if (td->min_good_bits) {
+		unsigned int bits = 0;
+		int i;
+
+		for (i = 0; i < td->len; i++)
+			bits += hweight8(buf[td->offs + i]);
+		return bits < td->min_good_bits ? -1 : 0;
+	}
 	/* Compare the pattern */
 	if (memcmp(buf + td->offs, td->pattern, td->len))
 		return -1;

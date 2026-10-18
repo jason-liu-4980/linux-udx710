@@ -538,4 +538,13 @@ config MTD_NAND_DISKONCHIP_BBTWRITE
 	  load time (assuming you build diskonchip as a module) with the module
 	  parameter "inftl_bbt_write=1".
 
+config MTD_NAND_SPRD_ORCA
+	tristate "Spreadtrum UDX710 Orca raw NAND controller"
+	depends on OF && HAS_DMA
+	depends on ARCH_SPRD || COMPILE_TEST
+	help
+	  DMA and hardware ECC support for the Spreadtrum Orca (UDX710) raw
+	  NAND controller, using the vendor NAND parameter table and stock
+	  ECC/OOB geometry.
+
 endif # MTD_RAW_NAND

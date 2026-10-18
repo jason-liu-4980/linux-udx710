@@ -32,6 +32,9 @@
  *              bad) block in the stored bbt
  * @pattern:	pattern to identify bad block table or factory marked good /
  *		bad blocks, can be NULL, if len = 0
+ * @min_good_bits: optional minimum number of set bits across a factory marker;
+ *                zero retains the exact pattern comparison. Not used for
+ *                locating on-flash BBT signatures.
  *
  * Descriptor for the bad block table marker and the descriptor for the
  * pattern which identifies good and bad blocks. The assumption is made
@@ -48,6 +51,7 @@ struct nand_bbt_descr {
 	int maxblocks;
 	int reserved_block_code;
 	uint8_t *pattern;
+	unsigned int min_good_bits;
 };
 
 /* Options for the bad block table descriptors */
