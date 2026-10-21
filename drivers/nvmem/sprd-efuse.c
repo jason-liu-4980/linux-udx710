@@ -371,11 +371,6 @@ static int sprd_efuse_read_uid(struct sprd_efuse *efuse, u8 uid[8])
 			goto clock_off;
 		words[i] &= 0x7fffffff;
 	}
-	if ((!words[0] && !words[1]) ||
-	    (words[0] == 0x7fffffff && words[1] == 0x7fffffff)) {
-		ret = -ENODATA;
-		goto clock_off;
-	}
 	for (i = 0; i < 8; i++)
 		uid[i] = words[i / 4] >> ((i % 4) * 8);
 
@@ -386,34 +381,37 @@ unlock:
 	return ret;
 }
 
-static ssize_t soc_uid_read(struct file *file, struct kobject *kobj,
-			    const struct bin_attribute *attr, char *buf,
-			    loff_t offset, size_t count)
+/* Keep calibration offsets at hardware block 2 and append the preceding
+ * two UID blocks to the read-only logical view. No calibration cell moves.
+ */
+static int sprd_orca_read(void *context, u32 offset, void *val, size_t bytes)
 {
-	struct sprd_efuse *efuse = dev_get_drvdata(kobj_to_dev(kobj));
-	u8 uid[8];
+	struct sprd_efuse *efuse = context;
+	u32 public_size = efuse->data->blk_nums * SPRD_EFUSE_BLOCK_WIDTH;
+	u8 uid[8], *out = val;
+	size_t count;
 	int ret;
 
-	if (offset < 0)
+	if (offset > public_size + sizeof(uid) ||
+	    bytes > public_size + sizeof(uid) - offset)
 		return -EINVAL;
-	if (offset >= sizeof(uid) || !count)
+	if (offset < public_size && bytes) {
+		count = min_t(size_t, bytes, public_size - offset);
+		ret = sprd_efuse_read(efuse, offset, out, count);
+		if (ret)
+			return ret;
+		offset += count;
+		out += count;
+		bytes -= count;
+	}
+	if (!bytes)
 		return 0;
 	ret = sprd_efuse_read_uid(efuse, uid);
 	if (ret)
 		return ret;
-	count = min_t(size_t, count, sizeof(uid) - offset);
-	memcpy(buf, uid + offset, count);
-	return count;
+	memcpy(out, uid + offset - public_size, bytes);
+	return 0;
 }
-
-static const BIN_ATTR_ADMIN_RO(soc_uid, 8);
-static const struct bin_attribute *const sprd_efuse_uid_bin_attrs[] = {
-	&bin_attr_soc_uid,
-	NULL,
-};
-static const struct attribute_group sprd_efuse_uid_group = {
-	.bin_attrs = sprd_efuse_uid_bin_attrs,
-};
 
 static int sprd_efuse_write(void *context, u32 offset, void *val, size_t bytes)
 {
@@ -515,8 +513,10 @@ static int sprd_efuse_probe(struct platform_device *pdev)
 	econfig.owner = THIS_MODULE;
 	econfig.name = pdata->read_only ? "orca-public-efuse" : "sprd-efuse";
 	econfig.size = efuse->data->blk_nums * SPRD_EFUSE_BLOCK_WIDTH;
-	econfig.add_legacy_fixed_of_cells = true;
-	econfig.reg_read = sprd_efuse_read;
+	econfig.add_legacy_fixed_of_cells = pdata != &orca_data;
+	econfig.reg_read = pdata == &orca_data ? sprd_orca_read : sprd_efuse_read;
+	if (pdata == &orca_data)
+		econfig.size += 8;
 	if (!pdata->read_only)
 		econfig.reg_write = sprd_efuse_write;
 	econfig.priv = efuse;
@@ -527,8 +527,6 @@ static int sprd_efuse_probe(struct platform_device *pdev)
 		return PTR_ERR(nvmem);
 	}
 	platform_set_drvdata(pdev, efuse);
-	if (pdata == &orca_data)
-		return devm_device_add_group(&pdev->dev, &sprd_efuse_uid_group);
 
 	return 0;
 }

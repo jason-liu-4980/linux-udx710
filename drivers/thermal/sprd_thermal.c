@@ -182,11 +182,7 @@ static int sprd_thm_sensor_calibration(struct device_node *np,
 	if (thm->var_data->strict_calibration) {
 		if (dt_offset < 0 || dt_offset > 255 || thm->ratio_off > 127)
 			return -ERANGE;
-		/* No known validity marker: do not accept ambiguous erased cells. */
-		if ((thm->ratio_sign == 1 && !thm->ratio_off && !dt_offset) ||
-		    (thm->ratio_sign == -1 && thm->ratio_off == 127 &&
-		     dt_offset == 255))
-			return -ENODATA;
+
 	}
 	ratio += thm->ratio_sign * thm->ratio_off;
 

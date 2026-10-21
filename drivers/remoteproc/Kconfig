@@ -14,6 +14,16 @@ config REMOTEPROC
 
 if REMOTEPROC
 
+config SPRD_UDX710_PMSYS
+	tristate "UDX710 PM_SYS CM4 remote processor"
+	depends on OF && (ARCH_SPRD || COMPILE_TEST)
+	select MFD_SYSCON
+	help
+	  Load the original raw CM4 firmware through the firmware loader.
+	  SIPC starts the processor after registering its receive endpoint.
+	  The board prepares the original firmware in RAM before loading
+	  this module. Hot stop and automatic recovery are not supported.
+
 config REMOTEPROC_CDEV
 	bool "Remoteproc character device interface"
 	help
@@ -389,6 +399,16 @@ config XLNX_R5_REMOTEPROC
 	  processor framework.
 
 	  It's safe to say N if not interested in using RPU r5f cores.
+
+config UDX710_MODEM_REMOTEPROC
+	bool "UDX710 modem subsystem remoteproc"
+	depends on ARCH_SPRD || COMPILE_TEST
+	depends on OF && HAS_IOMEM
+	select MFD_SYSCON
+	help
+	  Load original raw modem/PHY/DSP firmware and prepared NV through
+	  the firmware loader, then release all modem cores in hardware order.
+	  Live stop and automatic recovery are not supported.
 
 endif # REMOTEPROC
 

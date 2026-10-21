@@ -1132,6 +1132,16 @@ config SPRD_WATCHDOG
 	  Say Y here to include watchdog timer supported
 	  by Spreadtrum system.
 
+config SC27XX_WATCHDOG
+	tristate "Spreadtrum SC2730 PMIC watchdog"
+	depends on OF && MFD_SC27XX_PMIC
+	select WATCHDOG_CORE
+	help
+	  Support the 32 kHz watchdog in the SC2730 PMIC over its parent
+	  ADI regmap. Once started, this watchdog cannot be stopped.
+	  The hardware supports 1 through 131071 seconds, defaulting to 60.
+	  When built as a module this driver is called sc27xx_wdt.
+
 config PM8916_WATCHDOG
 	tristate "Qualcomm PM8916 pmic watchdog"
 	depends on OF && MFD_SPMI_PMIC

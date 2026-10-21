@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* SY108 board MCU over its fixed 115200/8N1 UART.
  * ADC3..5 expose raw counts.
- * USB/power requests are queued as device events. Board policy acknowledges
- * the queue head before its gadget/shutdown operation.
+ * USB requests are acknowledged by the driver and announced as device events.
+ * Power requests are acknowledged by the blocking reboot notifier, before
+ * device shutdown closes the UART.
  */
 #include <linux/completion.h>
 #include <linux/delay.h>
@@ -12,6 +13,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/property.h>
+#include <linux/reboot.h>
 #include <linux/serdev.h>
 #include <linux/spinlock.h>
 #include <linux/unaligned.h>
@@ -24,19 +26,19 @@
 struct sy108_event {
 	u64 sequence;
 	u8 minor;
-	bool announced, ack_started;
 };
 
 struct sy108_mcu {
 	struct serdev_device *serdev;
 	struct mutex command_lock;
-	struct mutex event_lock;
 	spinlock_t rx_lock;
 	struct completion response;
 	struct work_struct event_work;
+	struct notifier_block reboot;
 	u8 stream[SY108_FRAME_MAX];
 	unsigned int used;
 	struct sy108_event events[SY108_EVENT_MAX];
+	struct sy108_event last_event, poweroff;
 	u64 next_event;
 	unsigned int event_head, event_count;
 	bool waiting, stopping, orphan_reply;
@@ -93,7 +95,7 @@ static void sy108_handle_frame(struct sy108_mcu *mcu, const u8 *frame)
 				mcu->usb_reset_events++;
 			schedule_work(&mcu->event_work);
 		}
-		/* No ACK until board policy acknowledges this queued event. */
+		/* The worker owns USB ACKs; power ACK waits for orderly poweroff. */
 		return;
 	}
 	/* SY108_MCU_V07 echoes the ADC channel in payload[0]; match it to
@@ -190,7 +192,7 @@ static int sy108_request(struct sy108_mcu *mcu, u8 minor, const u8 *payload,
 	mutex_lock(&mcu->command_lock);
 	spin_lock_irqsave(&mcu->rx_lock, flags);
 	ret = mcu->stopping ? -ESHUTDOWN : mcu->link_error;
-	if (!ret && mcu->event_count)
+	if (!ret && (mcu->event_count || mcu->poweroff.sequence))
 		ret = -EAGAIN;
 	if (ret) {
 		spin_unlock_irqrestore(&mcu->rx_lock, flags);
@@ -244,127 +246,108 @@ unlock:
 	return ret;
 }
 
+static void sy108_ack(struct sy108_mcu *mcu, const struct sy108_event *event)
+{
+	unsigned long flags;
+	u8 zero = 0, frame[8];
+	size_t size;
+	ssize_t written;
+	int ret;
+
+	/* serdev serializes complete frames, including against ADC requests. */
+	size = sy108_encode(event->minor == 4 ? 0x40 : 0xa0, &zero,
+			    event->minor == 4 ? 0 : 1, frame);
+	written = serdev_device_write(mcu->serdev, frame, size, SY108_TIMEOUT);
+	ret = written == (ssize_t)size ? 0 : written < 0 ? written : -EIO;
+	if (!ret)
+		serdev_device_wait_until_sent(mcu->serdev, SY108_TIMEOUT);
+	spin_lock_irqsave(&mcu->rx_lock, flags);
+	mcu->ack_attempts++;
+	if (ret)
+		mcu->ack_failures++;
+	mcu->last_ack_seq = event->sequence;
+	mcu->last_ack_error = ret;
+	spin_unlock_irqrestore(&mcu->rx_lock, flags);
+	if (ret)
+		dev_warn(&mcu->serdev->dev, "MCU ACK seq=%llu failed: %d\n",
+			 event->sequence, ret);
+}
+
 static void sy108_events(struct work_struct *work)
 {
-	struct sy108_mcu *mcu =
-		container_of(work, struct sy108_mcu, event_work);
+	struct sy108_mcu *mcu = container_of(work, struct sy108_mcu, event_work);
 	unsigned long flags;
 
 	for (;;) {
-		struct sy108_event event = {};
+		struct sy108_event event;
 		char sequence[48];
-		char *env[4];
-		unsigned int i;
+		char *env[3];
 
 		spin_lock_irqsave(&mcu->rx_lock, flags);
-		if (mcu->stopping) {
+		if (mcu->stopping || !mcu->event_count) {
 			spin_unlock_irqrestore(&mcu->rx_lock, flags);
 			return;
 		}
-		for (i = 0; i < mcu->event_count; i++) {
-			struct sy108_event *pending =
-				&mcu->events[(mcu->event_head + i) %
-					     SY108_EVENT_MAX];
-
-			if (!pending->announced) {
-				pending->announced = true;
-				event = *pending;
-				break;
-			}
-		}
+		event = mcu->events[mcu->event_head];
+		mcu->event_head = (mcu->event_head + 1) % SY108_EVENT_MAX;
+		mcu->event_count--;
+		mcu->last_event = event;
+		if (event.minor == 4 && !mcu->poweroff.sequence)
+			mcu->poweroff = event;
 		spin_unlock_irqrestore(&mcu->rx_lock, flags);
-		if (!event.sequence)
-			return;
-		snprintf(sequence, sizeof(sequence), "MCU_SEQ=%llu",
-			 event.sequence);
-		env[0] = event.minor == 4 ? "MCU_EVENT=poweroff" :
-					    "MCU_EVENT=usb-reset";
+
+		if (event.minor == 0x0a)
+			sy108_ack(mcu, &event);
+		snprintf(sequence, sizeof(sequence), "MCU_SEQ=%llu", event.sequence);
+		env[0] = event.minor == 4 ? "MCU_EVENT=poweroff" : "MCU_EVENT=usb-reset";
 		env[1] = sequence;
-		env[2] = "MCU_ACK=pending";
-		env[3] = NULL;
+		env[2] = NULL;
 		kobject_uevent_env(&mcu->serdev->dev.kobj, KOBJ_CHANGE, env);
 	}
+}
+
+static int sy108_poweroff_notify(struct notifier_block *nb,
+				 unsigned long action, void *unused)
+{
+	struct sy108_mcu *mcu = container_of(nb, struct sy108_mcu, reboot);
+	struct sy108_event event;
+	unsigned long flags;
+
+	if (action != SYS_POWER_OFF)
+		return NOTIFY_DONE;
+	/* Drain received requests while the UART is still available. This
+	 * blocking notifier runs before device_shutdown(), unlike sys-off prepare.
+	 */
+	flush_work(&mcu->event_work);
+	spin_lock_irqsave(&mcu->rx_lock, flags);
+	event = mcu->poweroff;
+	mcu->poweroff.sequence = 0;
+	spin_unlock_irqrestore(&mcu->rx_lock, flags);
+	if (event.sequence)
+		sy108_ack(mcu, &event);
+	/* The stock protocol attempts an ACK once; an I/O error does not veto
+	 * the already requested system poweroff.
+	 */
+	return NOTIFY_DONE;
 }
 
 static ssize_t event_show(struct device *dev, struct device_attribute *attr,
 			  char *buf)
 {
 	struct sy108_mcu *mcu = dev_get_drvdata(dev);
-	struct sy108_event event = {};
+	struct sy108_event event;
 	unsigned long flags;
 
 	spin_lock_irqsave(&mcu->rx_lock, flags);
-	if (mcu->event_count)
-		event = mcu->events[mcu->event_head];
+	/* Retain an early power request until the boot-policy adapter is ready. */
+	event = mcu->poweroff.sequence ? mcu->poweroff : mcu->last_event;
 	spin_unlock_irqrestore(&mcu->rx_lock, flags);
 	if (!event.sequence)
 		return sysfs_emit(buf, "none\n");
-	return sysfs_emit(buf, "seq=%llu minor=%02x kind=%s ack=%s\n",
-			  event.sequence, event.minor,
-			  event.minor == 4 ? "poweroff" : "usb-reset",
-			  event.ack_started ? "writing" : "pending");
+	return sysfs_emit(buf, "seq=%llu kind=%s\n", event.sequence,
+			  event.minor == 4 ? "poweroff" : "usb-reset");
 }
 static DEVICE_ATTR_RO(event);
-
-static ssize_t event_ack_store(struct device *dev,
-			       struct device_attribute *attr, const char *buf,
-			       size_t count)
-{
-	struct sy108_mcu *mcu = dev_get_drvdata(dev);
-	struct sy108_event *event;
-	unsigned long flags;
-	u64 sequence;
-	u8 minor, zero = 0, frame[8];
-	size_t size;
-	ssize_t written;
-	int ret;
-
-	ret = kstrtou64(buf, 10, &sequence);
-	if (ret || !sequence)
-		return ret ?: -EINVAL;
-	mutex_lock(&mcu->event_lock);
-	spin_lock_irqsave(&mcu->rx_lock, flags);
-	ret = mcu->stopping ? -ESHUTDOWN : -ESTALE;
-	if (!mcu->event_count || mcu->stopping)
-		goto unlock_rx;
-	event = &mcu->events[mcu->event_head];
-	if (event->sequence != sequence)
-		goto unlock_rx;
-	ret = -EALREADY;
-	if (event->ack_started)
-		goto unlock_rx;
-	event->ack_started = true;
-	minor = event->minor;
-	spin_unlock_irqrestore(&mcu->rx_lock, flags);
-
-	/* serdev serializes whole frames with write_lock; an event ACK need
-	 * not wait for an ADC transaction's response.
-	 */
-	size = sy108_encode(minor == 4 ? 0x40 : 0xa0, &zero, minor == 4 ? 0 : 1,
-			    frame);
-	written = serdev_device_write(mcu->serdev, frame, size, SY108_TIMEOUT);
-	spin_lock_irqsave(&mcu->rx_lock, flags);
-	ret = written == (ssize_t)size ? 0 : written < 0 ? written : -EIO;
-	mcu->ack_attempts++;
-	if (ret)
-		mcu->ack_failures++;
-	mcu->last_ack_seq = sequence;
-	mcu->last_ack_error = ret;
-	/* Stock attempts ACK once and continues its AP action even on failure.
-	 * Consume this event after any attempt; neither replay its ACK nor let
-	 * a failed head prevent subsequent notifications from being handled.
-	 */
-	mcu->event_head = (mcu->event_head + 1) % SY108_EVENT_MAX;
-	mcu->event_count--;
-	/* Do not let VFS restart an interrupted ACK write as a second request. */
-	if (ret == -ERESTARTSYS || ret == -EINTR)
-		ret = -EIO;
-unlock_rx:
-	spin_unlock_irqrestore(&mcu->rx_lock, flags);
-	mutex_unlock(&mcu->event_lock);
-	return ret ? ret : count;
-}
-static DEVICE_ATTR_WO(event_ack);
 
 static int sy108_read_raw(struct iio_dev *indio,
 			  const struct iio_chan_spec *chan, int *val, int *val2,
@@ -453,7 +436,6 @@ static struct attribute *sy108_attrs[] = {
 	&dev_attr_firmware_version.attr,
 	&dev_attr_status.attr,
 	&dev_attr_event.attr,
-	&dev_attr_event_ack.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(sy108);
@@ -488,7 +470,6 @@ static int sy108_probe(struct serdev_device *serdev)
 	mcu = iio_priv(indio);
 	mcu->serdev = serdev;
 	mutex_init(&mcu->command_lock);
-	mutex_init(&mcu->event_lock);
 	spin_lock_init(&mcu->rx_lock);
 	init_completion(&mcu->response);
 	INIT_WORK(&mcu->event_work, sy108_events);
@@ -535,8 +516,11 @@ static int sy108_probe(struct serdev_device *serdev)
 	ret = devm_iio_device_register(dev, indio);
 	if (ret)
 		return ret;
-	dev_info(dev,
-		 "MCU ADC3..5 registered; event ACK requires board policy\n");
+	mcu->reboot.notifier_call = sy108_poweroff_notify;
+	ret = devm_register_reboot_notifier(dev, &mcu->reboot);
+	if (ret)
+		return ret;
+	dev_info(dev, "MCU ADC3..5 and driver-owned USB/power ACKs registered\n");
 	return 0;
 }
 

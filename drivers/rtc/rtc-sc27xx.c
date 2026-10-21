@@ -12,17 +12,7 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/rtc.h>
-#include <linux/timekeeping.h>
 #include <linux/udx710-trial.h>
-#include <linux/pid.h>
-#include <linux/sched/signal.h>
-#define UDX_LEASE_RATE 32768u
-#define UDX_LEASE_TICKS (60u * UDX_LEASE_RATE)
-struct udx_lease_state {
-	uint64_t last_renew_ms;
-	unsigned int renewals, closed, ready_stage;
-};
-
 #define SPRD_RTC_SEC_CNT_VALUE 0x0
 #define SPRD_RTC_MIN_CNT_VALUE 0x4
 #define SPRD_RTC_HOUR_CNT_VALUE 0x8
@@ -115,9 +105,6 @@ struct sprd_rtc {
 	u32 base;
 	int irq;
 	bool valid;
-	struct udx_lease_state trial_lease;
-	struct pid *trial_local_owner;
-	bool trial_owner_cleanup;
 };
 
 /*
@@ -670,271 +657,49 @@ static ssize_t udx_trial_stage_store(struct device *dev,
 
 	if (!trial_local_enabled(rtc))
 		return -EOPNOTSUPP;
-	if (!sysfs_streq(buf, "initramfs"))
+	if (sysfs_streq(buf, "initramfs")) {
+		from = UDX_RTC_DRIVER_FRAMEWORK;
+		to = UDX_RTC_INITRAMFS;
+	} else if (sysfs_streq(buf, "runtime")) {
+		from = UDX_RTC_INITRAMFS;
+		to = trial_ready_stage();
+	} else {
 		return -EINVAL;
-	from = UDX_RTC_DRIVER_FRAMEWORK;
-	to = UDX_RTC_INITRAMFS;
+	}
 	mutex_lock(&rtc->rtc->ops_lock);
+	/* A manually restarted owner may reclaim the already-ready runtime. */
+	if (from == UDX_RTC_INITRAMFS) {
+		unsigned int stage;
+
+		ret = regmap_read(rtc->regmap, rtc->base + 0x50, &stage);
+		if (ret || stage == to)
+			goto out;
+	}
 	ret = udx_trial_stage_set(rtc, from, to);
+out:
 	mutex_unlock(&rtc->rtc->ops_lock);
 	return ret ? ret : count;
 }
 
 static DEVICE_ATTR_RW(udx_trial_stage);
 
-static int lease_read(struct sprd_rtc *rtc, unsigned int reg,
-		      unsigned int *value)
-{
-	return regmap_read(rtc->regmap, reg, value);
-}
-
-static int udx_lease_peek(struct sprd_rtc *rtc, unsigned int *count)
-{
-	if (!count)
-		return -EINVAL;
-	for (unsigned int i = 0; i < 4; i++) {
-		unsigned int hi, lo, again;
-		int ret;
-
-		ret = lease_read(rtc, 0x5c, &hi);
-		if (ret)
-			return ret;
-		ret = lease_read(rtc, 0x58, &lo);
-		if (ret)
-			return ret;
-		ret = lease_read(rtc, 0x5c, &again);
-		if (ret)
-			return ret;
-		if (hi == again) {
-			*count = (hi << 16) | lo;
-			return 0;
-		}
-	}
-	return -EAGAIN;
-}
-
-static int udx_lease_claim(struct sprd_rtc *rtc, struct udx_lease_state *s)
-{
-	unsigned int control;
-	int ret;
-
-	if (!s || !s->ready_stage)
-		return -EINVAL;
-	if (s->closed)
-		return -ESHUTDOWN;
-	ret = lease_read(rtc, 0x48, &control);
-	if (ret)
-		return ret;
-	return (control & 14u) == 14u ? 0 : -EPROTO;
-}
-
-static int lease_idle(struct sprd_rtc *rtc)
-{
-	for (unsigned int i = 0; i < 64; i++) {
-		unsigned int raw;
-		int ret = lease_read(rtc, 0x50, &raw);
-
-		if (ret)
-			return ret;
-		if (!(raw & 0x10))
-			return 0;
-		if (i + 1 < 64)
-			udelay(10);
-	}
-	return -ETIMEDOUT;
-}
-
-static int lease_load(struct sprd_rtc *rtc, unsigned int high)
-{
-	const unsigned int regs[] = { 0x60, 0x44, 0x40, 0x60 };
-	const unsigned int values[] = { 0xe551, high, 0, 0x1aae };
-	int ret = lease_idle(rtc);
-
-	if (ret)
-		return ret;
-	for (unsigned int i = 0; i < 4; i++) {
-		ret = regmap_write(rtc->regmap, regs[i], values[i]);
-		if (ret)
-			return ret;
-	}
-	udelay(100);
-	return lease_idle(rtc);
-}
-
-static void udx_lease_close(struct udx_lease_state *s)
-{
-	if (s)
-		s->closed = 1;
-}
-
-static int udx_lease_renew(struct sprd_rtc *rtc, struct udx_lease_state *s)
-{
-	int ret;
-
-	if (!s)
-		return -EINVAL;
-	if (s->closed)
-		return -ESHUTDOWN;
-	ret = lease_load(rtc, 30);
-
-	if (!ret) {
-		s->renewals++;
-		s->last_renew_ms = ktime_get_boottime_ns() / 1000000;
-	}
-	return ret;
-}
-
-static int lease_reason(struct sprd_rtc *rtc, unsigned int value)
+/* Only the existing RTC stage and reboot-reason ABI belongs here. */
+static int udx_trial_reboot_target(struct sprd_rtc *rtc, bool recovery)
 {
 	unsigned int prior;
-	int ret = lease_read(rtc, 0x1bac, &prior);
-
-	if (ret)
-		return ret;
-	return regmap_write(rtc->regmap, 0x1bac, (prior & 0x200u) | value);
-}
-
-static int lease_boot_window(struct sprd_rtc *rtc, struct udx_lease_state *s,
-			     unsigned int recovery, unsigned int high)
-{
 	int ret;
 
-	if (!s || recovery > 1 || !s->ready_stage)
-		return -EINVAL;
-	if (s->closed)
-		return -ESHUTDOWN;
-	udx_lease_close(s);
-	ret = udx_trial_stage_set(rtc, s->ready_stage,
-				  recovery ? 0xbc5a : 0xb65a);
+	ret = udx_trial_stage_set(rtc, trial_ready_stage(),
+				 recovery ? UDX_RTC_RECOVERY_READY : UDX_RTC_ORIGINAL);
 	if (ret)
 		return ret;
-	ret = lease_reason(rtc, recovery ? 0x20 : 0x40);
+	ret = regmap_read(rtc->regmap, 0x1bac, &prior);
 	if (ret)
 		return ret;
-	return lease_load(rtc, high);
+	return regmap_write(rtc->regmap, 0x1bac,
+			    (prior & 0x200u) | (recovery ? 0x20 : 0x40));
 }
 
-static int udx_lease_boot_reboot(struct sprd_rtc *rtc,
-				 struct udx_lease_state *s,
-				 unsigned int recovery)
-{
-	return lease_boot_window(rtc, s, recovery, 6);
-}
-
-static int udx_lease_boot_upgrade(struct sprd_rtc *rtc,
-				  struct udx_lease_state *s)
-{
-	if (!s || (s->ready_stage != 0xbe5a && s->ready_stage != 0xbc5a))
-		return -EINVAL;
-	return lease_boot_window(rtc, s, 0, 30);
-}
-
-static int trial_lease_admit(struct sprd_rtc *rtc)
-{
-	if (!trial_local_enabled(rtc))
-		return -ENODEV;
-	return rtc->trial_local_owner == task_tgid(current) ? 0 : -EPERM;
-}
-
-static void trial_owner_put(void *data)
-{
-	struct sprd_rtc *rtc = data;
-
-	put_pid(rtc->trial_local_owner);
-}
-
-static ssize_t udx_trial_lease_owner_store(struct device *dev,
-					   struct device_attribute *attr,
-					   const char *buf, size_t count)
-{
-	struct sprd_rtc *rtc = dev_get_drvdata(dev);
-	struct task_struct *owner;
-	unsigned int stage;
-	int ret;
-
-	if (!sysfs_streq(buf, "claim"))
-		return -EINVAL;
-	if (!trial_local_enabled(rtc))
-		return -EOPNOTSUPP;
-	mutex_lock(&rtc->rtc->ops_lock);
-	if (rtc->trial_lease.closed) {
-		ret = -EBUSY;
-		goto out;
-	}
-	owner = rtc->trial_local_owner ?
-			get_pid_task(rtc->trial_local_owner, PIDTYPE_TGID) :
-			NULL;
-	if (owner) {
-		bool active = !READ_ONCE(owner->exit_state);
-
-		put_task_struct(owner);
-		if (active) {
-			ret = -EBUSY;
-			goto out;
-		}
-	}
-	rtc->trial_lease.ready_stage = trial_ready_stage();
-	ret = regmap_read(rtc->regmap, rtc->base + 0x50, &stage);
-	if (ret)
-		goto out;
-	if (stage == UDX_RTC_INITRAMFS)
-		ret = udx_trial_stage_set(rtc, stage, trial_ready_stage());
-	else if (stage != trial_ready_stage())
-		ret = -EPROTO;
-	if (ret)
-		goto out;
-	ret = udx_lease_claim(rtc, &rtc->trial_lease);
-	if (ret)
-		goto out;
-	put_pid(rtc->trial_local_owner);
-	rtc->trial_local_owner = get_task_pid(current, PIDTYPE_TGID);
-	if (!rtc->trial_owner_cleanup) {
-		ret = devm_add_action_or_reset(rtc->dev, trial_owner_put, rtc);
-		if (ret) {
-			rtc->trial_local_owner = NULL;
-			goto out;
-		}
-		rtc->trial_owner_cleanup = true;
-	}
-	dev_info(dev,
-		 "runtime watchdog owner pid %d; existing countdown retained\n",
-		 pid_nr(rtc->trial_local_owner));
-out:
-	mutex_unlock(&rtc->rtc->ops_lock);
-	return ret ? ret : count;
-}
-
-static DEVICE_ATTR_WO(udx_trial_lease_owner);
-
-static ssize_t udx_trial_lease_status_show(struct device *dev,
-					   struct device_attribute *attr,
-					   char *buf)
-{
-	struct sprd_rtc *rtc = dev_get_drvdata(dev);
-	unsigned int count, stage;
-	int ret;
-
-	if (!trial_local_enabled(rtc))
-		return -ENODEV;
-	mutex_lock(&rtc->rtc->ops_lock);
-	ret = udx_lease_peek(rtc, &count);
-	if (!ret)
-		ret = regmap_read(rtc->regmap, rtc->base + 0x50, &stage);
-	if (!ret)
-		ret = sysfs_emit(
-			buf,
-			"mode=standalone owner=%d stage=%04x remaining_ticks=%u renewals=%u closed=%u last_renew_ms=%llu\n",
-			rtc->trial_local_owner ?
-				pid_nr(rtc->trial_local_owner) :
-				0,
-			stage, count, rtc->trial_lease.renewals,
-			rtc->trial_lease.closed,
-			(unsigned long long)rtc->trial_lease.last_renew_ms);
-	mutex_unlock(&rtc->rtc->ops_lock);
-	return ret;
-}
-
-static DEVICE_ATTR_RO(udx_trial_lease_status);
 static ssize_t udx_boot_policy_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
@@ -948,29 +713,6 @@ static ssize_t udx_boot_policy_show(struct device *dev,
 }
 
 static DEVICE_ATTR_RO(udx_boot_policy);
-static ssize_t udx_trial_lease_store(struct device *dev,
-				     struct device_attribute *attr,
-				     const char *buf, size_t count)
-{
-	struct sprd_rtc *rtc = dev_get_drvdata(dev);
-	bool close = sysfs_streq(buf, "close");
-	int ret;
-
-	if (!close && !sysfs_streq(buf, "renew"))
-		return -EINVAL;
-	mutex_lock(&rtc->rtc->ops_lock);
-	ret = trial_lease_admit(rtc);
-	if (!ret) {
-		if (close)
-			udx_lease_close(&rtc->trial_lease);
-		else
-			ret = udx_lease_renew(rtc, &rtc->trial_lease);
-	}
-	mutex_unlock(&rtc->rtc->ops_lock);
-	return ret ? ret : count;
-}
-
-static DEVICE_ATTR_WO(udx_trial_lease);
 static ssize_t udx_trial_reboot_store(struct device *dev,
 				      struct device_attribute *attr,
 				      const char *buf, size_t count)
@@ -978,7 +720,7 @@ static ssize_t udx_trial_reboot_store(struct device *dev,
 	struct sprd_rtc *rtc = dev_get_drvdata(dev);
 	char target[16], extra;
 	int ret, boot_target = trial_boot_target();
-	bool recovery = false, upgrade = false;
+	bool recovery = false;
 
 	if (sscanf(buf, "%15s %c", target, &extra) != 1)
 		return -EINVAL;
@@ -986,26 +728,17 @@ static ssize_t udx_trial_reboot_store(struct device *dev,
 		return -ENODEV;
 	if (!strcmp(target, "recovery"))
 		recovery = true;
-	else if (!strcmp(target, "upgrade"))
-		upgrade = true;
-	else if (strcmp(target, "openwrt"))
+	else if (strcmp(target, "upgrade") && strcmp(target, "openwrt"))
 		return -EINVAL;
 	mutex_lock(&rtc->rtc->ops_lock);
-	ret = trial_lease_admit(rtc);
-	if (ret) {
-		mutex_unlock(&rtc->rtc->ops_lock);
-		return ret;
-	}
-	if (upgrade)
-		ret = udx_lease_boot_upgrade(rtc, &rtc->trial_lease);
-	else
-		ret = udx_lease_boot_reboot(rtc, &rtc->trial_lease, recovery);
+	ret = trial_local_enabled(rtc) ?
+		udx_trial_reboot_target(rtc, recovery) : -ENODEV;
 	mutex_unlock(&rtc->rtc->ops_lock);
 	if (ret)
-		dev_warn(dev, "trial reboot %s refused: %d; renewals closed\n",
+		dev_warn(dev, "trial reboot %s stage/reason failed: %d\n",
 			 target, ret);
 	else
-		dev_info(dev, "trial reboot %s queued; CTRL remains14\n",
+		dev_info(dev, "trial reboot %s stage/reason recorded\n",
 			 target);
 	return ret ? ret : count;
 }
@@ -1013,9 +746,6 @@ static ssize_t udx_trial_reboot_store(struct device *dev,
 static DEVICE_ATTR_WO(udx_trial_reboot);
 static struct attribute *udx_trial_attrs[] = {
 	&dev_attr_udx_trial_stage.attr,
-	&dev_attr_udx_trial_lease.attr,
-	&dev_attr_udx_trial_lease_owner.attr,
-	&dev_attr_udx_trial_lease_status.attr,
 	&dev_attr_udx_boot_policy.attr,
 	&dev_attr_udx_trial_reboot.attr,
 	NULL,

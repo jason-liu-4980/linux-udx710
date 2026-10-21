@@ -76,8 +76,6 @@ struct sprd_ex {
 	int fault;
 };
 
-static struct uart_driver sprd_ex_uart_driver;
-
 static struct sprd_ex *to_ex(struct uart_port *port)
 {
 	return container_of(port, struct sprd_ex, port);
@@ -735,7 +733,7 @@ static int ex_probe(struct platform_device *pdev)
 	ex->rx_enabled = true;
 	ex->tx_empty = true;
 	serial_out(&ex->port, SPRD_IEN, EX_RX_IRQS);
-	ret = uart_add_one_port(&sprd_ex_uart_driver, &ex->port);
+	ret = uart_add_one_port(&sprd_uart_driver, &ex->port);
 	if (ret)
 		goto retained;
 	platform_set_drvdata(pdev, ex);
@@ -799,32 +797,10 @@ static struct platform_driver ex_platform_driver = {
 	},
 };
 
-static struct uart_driver sprd_ex_uart_driver = {
-	.owner = THIS_MODULE,
-	.driver_name = "sprd-serial-ex",
-	.dev_name = "ttySE",
-	.nr = 2,
-};
-
-static int __init ex_init(void)
+int __init sprd_serial_ex_register(void)
 {
-	int ret = uart_register_driver(&sprd_ex_uart_driver);
-
-	if (ret)
-		return ret;
-	ret = platform_driver_register(&ex_platform_driver);
-	if (ret)
-		uart_unregister_driver(&sprd_ex_uart_driver);
-	return ret;
+	return platform_driver_register(&ex_platform_driver);
 }
-module_init(ex_init);
-
-static void __exit ex_exit(void)
-{
-	platform_driver_unregister(&ex_platform_driver);
-	uart_unregister_driver(&sprd_ex_uart_driver);
-}
-module_exit(ex_exit);
 
 MODULE_DESCRIPTION("UDX710 PM_SYS interrupt-proxy UART");
 MODULE_LICENSE("GPL");

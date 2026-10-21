@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 config SPRD_SIPC
 	bool "Experimental UDX710 local-peer SIPC v2 transport"
-	depends on ARM64 && OF && MAILBOX && EXPERT
+	depends on ARM64 && OF && MAILBOX && EXPERT && REMOTEPROC
 	select GENERIC_ALLOCATOR
 	help
 	  AP-side SMSG, SMEM, SBUF and SBLOCK using the standard mailbox

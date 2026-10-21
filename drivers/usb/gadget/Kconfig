@@ -237,16 +237,6 @@ config USB_CONFIGFS
 	  appropriate symbolic links.
 	  For more information see Documentation/usb/gadget_configfs.rst.
 
-config USB_CONFIGFS_VSER
-	bool "Spreadtrum vendor serial misc-device function"
-	depends on USB_CONFIGFS=y && TTY
-	select USB_U_SERIAL
-	help
-	  Provide the captured vser.gs0 vendor-specific bulk interface and
-	  /dev/vser with the class 0x22 port-open handshake. This is not CDC
-	  ACM. Only normal AP byte transport is supported; vendor test/IQ
-	  requests fail. Open files hold references across configfs removal.
-
 config USB_CONFIGFS_SERIAL
 	bool "Generic serial bulk in/out"
 	depends on USB_CONFIGFS

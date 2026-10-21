@@ -27,7 +27,7 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 #include <linux/sipc.h>
-#include <linux/sprd_pmsys.h>
+#include <linux/remoteproc.h>
 #include <linux/sizes.h>
 
 #include "sipc_priv.h"
@@ -296,9 +296,14 @@ static int sipc_validate_local_peer(struct smsg_ipc *ipc,
 }
 #endif
 
+static void sipc_rproc_put(void *data)
+{
+	rproc_put(data);
+}
+
 static int sipc_probe(struct platform_device *pdev)
 {
-	struct sprd_pmsys *pmsys = NULL;
+	struct rproc *pmsys = NULL;
 	struct smsg_ipc *ipc;
 	struct device_node *np;
 	int ret;
@@ -316,9 +321,21 @@ static int sipc_probe(struct platform_device *pdev)
 		ipc->dev = &pdev->dev;
 		if (ipc->dst == SIPC_ID_PM_SYS &&
 		    of_find_property(np, "sprd,pm-sys", NULL)) {
-			pmsys = sprd_pmsys_get(&pdev->dev);
-			if (IS_ERR(pmsys))
-				return PTR_ERR(pmsys);
+			u32 handle;
+
+			ret = of_property_read_u32(np, "sprd,pm-sys", &handle);
+			if (ret)
+				return ret;
+			pmsys = rproc_get_by_phandle(handle);
+			if (!pmsys)
+				return -EPROBE_DEFER;
+			ret = devm_add_action_or_reset(&pdev->dev, sipc_rproc_put,
+						      pmsys);
+			if (ret)
+				return ret;
+			if (!device_link_add(&pdev->dev, pmsys->dev.parent,
+					     DL_FLAG_AUTOREMOVE_CONSUMER))
+				return -ENOMEM;
 		}
 #ifdef CONFIG_SPRD_SIPC_MBOX_CLIENT
 		ret = sipc_validate_local_peer(ipc, np);
@@ -340,7 +357,7 @@ static int sipc_probe(struct platform_device *pdev)
 		 * first; UART/DDR consumers follow this completed endpoint probe.
 		 */
 		if (pmsys) {
-			ret = sprd_pmsys_start(pmsys);
+			ret = rproc_boot(pmsys);
 			if (ret) {
 				smsg_ipc_destroy(ipc);
 				return ret;

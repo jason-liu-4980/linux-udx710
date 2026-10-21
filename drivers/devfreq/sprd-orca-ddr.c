@@ -16,12 +16,9 @@
 
 #define ORCA_DFS_VOTE 0x0000
 #define ORCA_DFS_ENABLE 0x0300
-#define ORCA_DFS_DISABLE 0x0305
 #define ORCA_DFS_AUTO_ENABLE 0x0310
-#define ORCA_DFS_AUTO_DISABLE 0x0315
 #define ORCA_DFS_GET_FREQ 0x0500
 #define ORCA_DFS_GET_AP 0x0502
-#define ORCA_DFS_GET_CP 0x0503
 #define ORCA_DFS_GET_TABLE 0x0505
 #define ORCA_DFS_GET_STATUS 0x050a
 #define ORCA_DFS_GET_AUTO 0x050b
@@ -38,8 +35,6 @@ struct orca_ddr {
 	struct devfreq_dev_profile profile;
 	struct devfreq *devfreq;
 	bool connected;
-	bool voted;
-	u32 previous_ap_mhz;
 	unsigned int added_opps;
 };
 
@@ -49,9 +44,7 @@ static int orca_dfs_request(struct orca_ddr *d, u16 command, u32 value,
 {
 	struct smsg message;
 	bool switch_command = command == ORCA_DFS_ENABLE ||
-			      command == ORCA_DFS_DISABLE ||
-			      command == ORCA_DFS_AUTO_ENABLE ||
-			      command == ORCA_DFS_AUTO_DISABLE;
+			      command == ORCA_DFS_AUTO_ENABLE;
 	u16 success = switch_command	       ? ORCA_DFS_ENABLE_OK :
 		      command == ORCA_DFS_VOTE ? ORCA_DFS_VOTE_OK :
 						 ORCA_DFS_QUERY_OK;
@@ -132,134 +125,12 @@ static int orca_ddr_target(struct device *dev, unsigned long *hz, u32 flags)
 	if (!ret) {
 		ret = orca_dfs_request(d, ORCA_DFS_VOTE,
 				       table[chosen] / ORCA_MHZ, &status);
-		if (!ret)
-			d->voted = true;
 	}
 	if (!ret)
 		ret = orca_ddr_read_hz(d, ORCA_DFS_GET_FREQ, hz);
 	mutex_unlock(&d->lock);
 	return ret;
 }
-
-static ssize_t orca_ddr_query_show(struct device *dev, u16 command,
-				   bool frequency, char *buf)
-{
-	struct orca_ddr *d = dev_get_drvdata(dev);
-	unsigned long hz = 0;
-	u32 value = 0;
-	int ret;
-
-	mutex_lock(&d->lock);
-	if (frequency)
-		ret = orca_ddr_read_hz(d, command, &hz);
-	else
-		ret = orca_dfs_request(d, command, 0, &value);
-	mutex_unlock(&d->lock);
-	return ret ? ret : sysfs_emit(buf, "%lu\n", frequency ? hz : value);
-}
-#define ORCA_DDR_ATTR(_name, _command, _frequency)                            \
-	static ssize_t _name##_show(struct device *dev,                       \
-				    struct device_attribute *attr, char *buf) \
-	{                                                                     \
-		return orca_ddr_query_show(dev, _command, _frequency, buf);   \
-	}                                                                     \
-	static DEVICE_ATTR_RO(_name)
-
-ORCA_DDR_ATTR(cp_vote_hz, ORCA_DFS_GET_CP, true);
-
-static ssize_t orca_ddr_switch_store(struct device *dev, const char *buf,
-				     size_t size, bool automatic)
-{
-	struct orca_ddr *d = dev_get_drvdata(dev);
-	bool enable;
-	u32 value;
-	u16 command;
-	int ret = kstrtobool(buf, &enable);
-
-	if (ret)
-		return ret;
-	command = automatic ? (enable ? ORCA_DFS_AUTO_ENABLE :
-					ORCA_DFS_AUTO_DISABLE) :
-			      (enable ? ORCA_DFS_ENABLE : ORCA_DFS_DISABLE);
-	mutex_lock(&d->lock);
-	ret = orca_dfs_request(d, command, 0, &value);
-	if (!ret)
-		ret = orca_dfs_request(
-			d, automatic ? ORCA_DFS_GET_AUTO : ORCA_DFS_GET_STATUS,
-			0, &value);
-	if (!ret && value != enable)
-		ret = -EIO;
-	mutex_unlock(&d->lock);
-	return ret ? ret : size;
-}
-
-#define ORCA_DDR_SWITCH(_name, _query, _automatic)                            \
-	static ssize_t _name##_show(struct device *dev,                       \
-				    struct device_attribute *attr, char *buf) \
-	{                                                                     \
-		return orca_ddr_query_show(dev, _query, false, buf);          \
-	}                                                                     \
-	static ssize_t _name##_store(struct device *dev,                      \
-				     struct device_attribute *attr,           \
-				     const char *buf, size_t size)            \
-	{                                                                     \
-		return orca_ddr_switch_store(dev, buf, size, _automatic);     \
-	}                                                                     \
-	static DEVICE_ATTR_RW(_name)
-
-ORCA_DDR_SWITCH(firmware_dfs_enabled, ORCA_DFS_GET_STATUS, false);
-ORCA_DDR_SWITCH(firmware_auto_enabled, ORCA_DFS_GET_AUTO, true);
-
-static ssize_t ap_vote_hz_show(struct device *dev,
-			       struct device_attribute *attr, char *buf)
-{
-	return orca_ddr_query_show(dev, ORCA_DFS_GET_AP, true, buf);
-}
-
-static ssize_t ap_vote_hz_store(struct device *dev,
-				struct device_attribute *attr, const char *buf,
-				size_t size)
-{
-	struct orca_ddr *d = dev_get_drvdata(dev);
-	unsigned long hz;
-	unsigned int i;
-	u32 value;
-	int ret = kstrtoul(buf, 0, &hz);
-
-	if (ret)
-		return ret;
-	/*
-	 * Zero withdraws the AP vote. A devfreq target is clamped to the minimum
-	 * OPP and cannot express this distinct firmware operation.
-	 */
-	if (hz) {
-		for (i = 0; i < d->profile.max_state; i++)
-			if (d->profile.freq_table[i] == hz)
-				break;
-		if (i == d->profile.max_state)
-			return -EINVAL;
-	}
-	mutex_lock(&d->lock);
-	ret = orca_dfs_request(d, ORCA_DFS_VOTE, hz / ORCA_MHZ, &value);
-	if (!ret) {
-		d->voted = true;
-		ret = orca_dfs_request(d, ORCA_DFS_GET_AP, 0, &value);
-	}
-	if (!ret && value != hz / ORCA_MHZ)
-		ret = -EIO;
-	mutex_unlock(&d->lock);
-	return ret ? ret : size;
-}
-static DEVICE_ATTR_RW(ap_vote_hz);
-
-static struct attribute *orca_ddr_attrs[] = {
-	&dev_attr_firmware_dfs_enabled.attr,
-	&dev_attr_firmware_auto_enabled.attr,
-	&dev_attr_ap_vote_hz.attr,
-	&dev_attr_cp_vote_hz.attr,
-	NULL,
-};
-ATTRIBUTE_GROUPS(orca_ddr);
 
 static int orca_freq_compare(const void *a, const void *b)
 {
@@ -283,7 +154,7 @@ static int orca_ddr_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct orca_ddr *d;
 	unsigned long *table;
-	u32 count, mhz, enabled, automatic;
+	u32 count, mhz, enabled, automatic, ap_vote;
 	int ret;
 	unsigned int i;
 
@@ -310,15 +181,6 @@ static int orca_ddr_probe(struct platform_device *pdev)
 				     "PM_SYS DDR channel open failed\n");
 	d->connected = true;
 	mutex_lock(&d->lock);
-	ret = orca_dfs_request(d, ORCA_DFS_GET_STATUS, 0, &enabled);
-	if (ret)
-		goto unlock;
-	ret = orca_dfs_request(d, ORCA_DFS_GET_AUTO, 0, &automatic);
-	if (ret)
-		goto unlock;
-	ret = orca_dfs_request(d, ORCA_DFS_GET_AP, 0, &d->previous_ap_mhz);
-	if (ret)
-		goto unlock;
 	for (i = 0; i < count; i++) {
 		ret = orca_dfs_request(d, ORCA_DFS_GET_TABLE, i, &mhz);
 		if (ret)
@@ -335,6 +197,29 @@ static int orca_ddr_probe(struct platform_device *pdev)
 			ret = -EINVAL;
 			goto unlock;
 		}
+	/* Product default: firmware controls DDR; no AP frequency request. */
+	ret = orca_dfs_request(d, ORCA_DFS_ENABLE, 0, &enabled);
+	if (ret)
+		goto unlock;
+	ret = orca_dfs_request(d, ORCA_DFS_AUTO_ENABLE, 0, &automatic);
+	if (ret)
+		goto unlock;
+	ret = orca_dfs_request(d, ORCA_DFS_VOTE, 0, &ap_vote);
+	if (ret)
+		goto unlock;
+	ret = orca_dfs_request(d, ORCA_DFS_GET_STATUS, 0, &enabled);
+	if (ret)
+		goto unlock;
+	ret = orca_dfs_request(d, ORCA_DFS_GET_AUTO, 0, &automatic);
+	if (ret)
+		goto unlock;
+	ret = orca_dfs_request(d, ORCA_DFS_GET_AP, 0, &ap_vote);
+	if (ret)
+		goto unlock;
+	if (enabled != 1 || automatic != 1 || ap_vote) {
+		ret = -EIO;
+		goto unlock;
+	}
 	ret = orca_ddr_read_hz(d, ORCA_DFS_GET_FREQ, &d->profile.initial_freq);
 	if (!ret && !d->profile.initial_freq)
 		ret = -ERANGE;
@@ -357,13 +242,13 @@ unlock:
 		d->added_opps++;
 	}
 	/*
-	 * Firmware's auto governor keeps running. No fabricated busy-time data
-	 * and no AP polling daemon. Userspace governor supplies explicit votes.
+	 * Keep normal devfreq monitoring and governor semantics. The product
+	 * does not request frequencies; root can still use standard debug controls.
 	 */
 	dev_info(
 		dev,
-		"PM_SYS DDR: %u frequencies, current %lu Hz, DFS %u, auto %u\n",
-		count, d->profile.initial_freq, enabled, automatic);
+		"PM_SYS DDR: %u frequencies, current %lu Hz, DFS %u, auto %u, AP request %u MHz\n",
+		count, d->profile.initial_freq, enabled, automatic, ap_vote);
 	for (i = 0; i < count; i++)
 		dev_info(dev, "DDR firmware frequency %u: %lu Hz\n", i,
 			 table[i]);
@@ -389,15 +274,9 @@ static void orca_ddr_remove(struct platform_device *pdev)
 
 	devfreq_remove_device(d->devfreq);
 	mutex_lock(&d->lock);
-	if (d->voted) {
-		ret = orca_dfs_request(d, ORCA_DFS_VOTE, d->previous_ap_mhz,
-				       &status);
-		if (ret)
-			dev_warn(
-				d->dev,
-				"Could not restore preceding AP DDR vote: %d\n",
-				ret);
-	}
+	ret = orca_dfs_request(d, ORCA_DFS_VOTE, 0, &status);
+	if (ret)
+		dev_warn(d->dev, "Could not release AP DDR vote: %d\n", ret);
 	if (d->connected)
 		smsg_ch_close(SIPC_ID_PM_SYS, SMSG_CH_PM_CTRL,
 			      msecs_to_jiffies(100));
@@ -417,9 +296,8 @@ static struct platform_driver orca_ddr_driver = {
 	.driver = {
 		.name = "sprd-orca-ddr",
 		.of_match_table = orca_ddr_of_match,
-		.dev_groups = orca_ddr_groups,
 	},
 };
 module_platform_driver(orca_ddr_driver);
-MODULE_DESCRIPTION("Orca PM_SYS firmware DDR frequency votes");
+MODULE_DESCRIPTION("Orca PM_SYS firmware DDR devfreq");
 MODULE_LICENSE("GPL");

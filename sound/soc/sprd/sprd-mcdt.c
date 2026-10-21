@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (C) 2019 Spreadtrum Communications Inc.
 
+#include <linux/clk.h>
 #include <linux/errno.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -107,6 +108,8 @@ enum sprd_mcdt_fifo_sts {
 
 struct sprd_mcdt_dev {
 	struct device *dev;
+	struct clk *clk;
+	u32 ap_offset;
 	void __iomem *base;
 	spinlock_t lock;
 	struct sprd_mcdt_chan chan[MCDT_CHANNEL_NUM];
@@ -846,6 +849,8 @@ struct sprd_mcdt_chan *sprd_mcdt_request_chan(u8 channel,
 
 	list_for_each_entry(temp, &sprd_mcdt_chan_list, list) {
 		if (temp->type == type && temp->id == channel) {
+			if (clk_prepare_enable(temp->mcdt->clk))
+				return NULL;
 			list_del_init(&temp->list);
 			break;
 		}
@@ -877,6 +882,7 @@ void sprd_mcdt_free_chan(struct sprd_mcdt_chan *chan)
 	}
 
 	list_add_tail(&chan->list, &sprd_mcdt_chan_list);
+	clk_disable_unprepare(chan->mcdt->clk);
 }
 EXPORT_SYMBOL_GPL(sprd_mcdt_free_chan);
 
@@ -899,6 +905,7 @@ static void sprd_mcdt_init_chans(struct sprd_mcdt_dev *mcdt,
 				(i - MCDT_ADC_CHANNEL_NUM) * 4;
 		}
 
+		chan->fifo_phys -= mcdt->ap_offset;
 		chan->mcdt = mcdt;
 		INIT_LIST_HEAD(&chan->list);
 
@@ -921,6 +928,11 @@ static int sprd_mcdt_probe(struct platform_device *pdev)
 	if (IS_ERR(mcdt->base))
 		return PTR_ERR(mcdt->base);
 
+	mcdt->clk = devm_clk_get_optional(&pdev->dev, NULL);
+	if (IS_ERR(mcdt->clk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(mcdt->clk), "MCDT clock\n");
+	if (of_device_is_compatible(pdev->dev.of_node, "sprd,roc1-mcdt"))
+		of_property_read_u32(pdev->dev.of_node, "sprd,ap-addr-offset", &mcdt->ap_offset);
 	mcdt->dev = &pdev->dev;
 	spin_lock_init(&mcdt->lock);
 	platform_set_drvdata(pdev, mcdt);
@@ -951,6 +963,7 @@ static void sprd_mcdt_remove(struct platform_device *pdev)
 
 static const struct of_device_id sprd_mcdt_of_match[] = {
 	{ .compatible = "sprd,sc9860-mcdt", },
+	{ .compatible = "sprd,roc1-mcdt", },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, sprd_mcdt_of_match);

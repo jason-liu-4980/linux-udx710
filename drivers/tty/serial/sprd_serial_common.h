@@ -15,6 +15,17 @@
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 
+extern struct uart_driver sprd_uart_driver;
+
+#if IS_ENABLED(CONFIG_SERIAL_SPRD_EX)
+int sprd_serial_ex_register(void);
+#else
+static inline int sprd_serial_ex_register(void)
+{
+	return 0;
+}
+#endif
+
 #define SPRD_FIFO_SIZE 128
 #define SPRD_DEF_RATE 26000000
 #define SPRD_BAUD_IO_LIMIT 3000000

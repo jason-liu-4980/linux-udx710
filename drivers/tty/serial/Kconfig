@@ -1395,10 +1395,12 @@ config SERIAL_SPRD
 
 config SERIAL_SPRD_EX
 	bool "Spreadtrum UDX710 SBUF-assisted UART extension"
-	depends on SERIAL_SPRD && SPRD_SIPC_V2 && OF && COMMON_CLK && EXPERT
+	depends on SERIAL_SPRD=y && SPRD_SIPC_V2 && OF && COMMON_CLK && EXPERT
 	help
-	  Support the ttySE serial consumer on Spreadtrum UDX710 using SBUF
-	  notifications, bounded PIO work and the UART AP reset controller.
+	  Support the PM_SYS-assisted UART port on Spreadtrum UDX710 using
+	  SBUF notifications and shared PIO helpers. The port uses the same
+	  serial core driver as the AP UARTs. The firmware session stays active
+	  across TTY closes and requires a built-in driver.
 
 config SERIAL_SPRD_CONSOLE
 	bool "Spreadtrum UART console support"

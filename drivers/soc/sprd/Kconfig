@@ -1,13 +1,2 @@
 # SPDX-License-Identifier: GPL-2.0-only
-config SPRD_UDX710_PMSYS
-	bool "UDX710 PM_SYS CM4 firmware startup"
-	depends on OF && (ARCH_SPRD || COMPILE_TEST) && MTD_UBI=y
-	select MFD_SYSCON
-	help
-	  Read the board's unchanged nr_pmsys UBI volume while CM4 is held
-	  in reset, then
-	  release it after SIPC has registered the mailbox receive endpoint.
-	  This does not enable the PM firmware's watchdog feeding service.
-
 source "drivers/soc/sprd/modem/sipc_v2/Kconfig"
-source "drivers/soc/sprd/modem/cproc/Kconfig"

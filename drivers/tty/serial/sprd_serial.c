@@ -59,7 +59,6 @@ struct sprd_uart_port {
 };
 
 static struct sprd_uart_port *sprd_port[UART_NR_MAX];
-static int sprd_ports_num;
 
 static int sprd_start_dma_rx(struct uart_port *port);
 static int sprd_tx_dma_config(struct uart_port *port);
@@ -791,7 +790,6 @@ static int sprd_console_setup(struct console *co, char *options)
 				parity, bits, flow);
 }
 
-static struct uart_driver sprd_uart_driver;
 static struct console sprd_console = {
 	.name = SPRD_TTY_NAME,
 	.write = sprd_console_write,
@@ -846,7 +844,7 @@ OF_EARLYCON_DECLARE(sprd_serial, "sprd,sc9836-uart",
 #define SPRD_CONSOLE		NULL
 #endif
 
-static struct uart_driver sprd_uart_driver = {
+struct uart_driver sprd_uart_driver = {
 	.owner = THIS_MODULE,
 	.driver_name = "sprd_serial",
 	.dev_name = SPRD_TTY_NAME,
@@ -864,11 +862,8 @@ static void sprd_remove(struct platform_device *dev)
 		uart_remove_one_port(&sprd_uart_driver, &sup->port);
 		sprd_port[sup->port.line] = NULL;
 		sprd_rx_free_buf(sup);
-		sprd_ports_num--;
 	}
 
-	if (!sprd_ports_num)
-		uart_unregister_driver(&sprd_uart_driver);
 }
 
 static bool sprd_uart_is_console(struct uart_port *uport)
@@ -989,15 +984,6 @@ static int sprd_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	if (!sprd_ports_num) {
-		ret = uart_register_driver(&sprd_uart_driver);
-		if (ret < 0) {
-			pr_err("Failed to register SPRD-UART driver\n");
-			goto free_rx_buf;
-		}
-	}
-
-	sprd_ports_num++;
 	sprd_port[index] = sport;
 
 	ret = uart_add_one_port(&sprd_uart_driver, up);
@@ -1010,9 +996,6 @@ static int sprd_probe(struct platform_device *pdev)
 
 clean_port:
 	sprd_port[index] = NULL;
-	if (--sprd_ports_num == 0)
-		uart_unregister_driver(&sprd_uart_driver);
-free_rx_buf:
 	sprd_rx_free_buf(sport);
 	return ret;
 }
@@ -1056,7 +1039,36 @@ static struct platform_driver sprd_platform_driver = {
 	},
 };
 
-module_platform_driver(sprd_platform_driver);
+static int __init sprd_serial_init(void)
+{
+	int ret;
+
+	ret = uart_register_driver(&sprd_uart_driver);
+	if (ret)
+		return ret;
+	ret = platform_driver_register(&sprd_platform_driver);
+	if (ret)
+		goto unregister_uart;
+	ret = sprd_serial_ex_register();
+	if (ret)
+		goto unregister_platform;
+	return 0;
+
+unregister_platform:
+	platform_driver_unregister(&sprd_platform_driver);
+unregister_uart:
+	uart_unregister_driver(&sprd_uart_driver);
+	return ret;
+}
+module_init(sprd_serial_init);
+
+/* SERIAL_SPRD_EX requires SERIAL_SPRD=y: its firmware session cannot unbind. */
+static void __exit sprd_serial_exit(void)
+{
+	platform_driver_unregister(&sprd_platform_driver);
+	uart_unregister_driver(&sprd_uart_driver);
+}
+module_exit(sprd_serial_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Spreadtrum SoC serial driver series");
