@@ -5,6 +5,7 @@ config SPRD_SIPA
 	bool "UDX710 SIPA AP packet transport"
 	depends on NET && INET && OF && HAS_IOMEM
 	select MFD_SYSCON
+	select WWAN
 	default n
 	help
 	  SIPA is a module for spreadtrum ip packet accelator driver.

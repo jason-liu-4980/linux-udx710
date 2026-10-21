@@ -197,9 +197,7 @@ static int sbuf_uart_commit(struct sbuf_uart_notifier *uart, u32 generation,
 	unsigned long flags;
 	int ret;
 
-	/* UART only: pair the final check and pointer publication with reset
-	 * and cancel. Legacy callers retain their original commit sequence.
-	 */
+	/* Pair the final check and pointer publication with UART reset/cancel. */
 	spin_lock_irqsave(&uart->sbuf->state_lock, flags);
 	ret = sbuf_uart_status_locked(uart, generation);
 	if (!ret) {
@@ -342,6 +340,8 @@ static void sbuf_notify_work(struct work_struct *work)
 		}
 		spin_unlock_irqrestore(&sbuf->state_lock, flags);
 		if (ready) {
+			blocking_notifier_call_chain(&sbuf->events,
+						     SBUF_NOTIFY_READY, NULL);
 			for (i = 0; i < sbuf->ringnr; i++) {
 				struct sbuf_ring *ring = &sbuf->rings[i];
 
@@ -414,6 +414,7 @@ static void sbuf_reset_session(struct sbuf_mgr *sbuf)
 		wake_up_interruptible_all(&sbuf->rings[i].txwait);
 		wake_up_interruptible_all(&sbuf->rings[i].rxwait);
 	}
+	blocking_notifier_call_chain(&sbuf->events, SBUF_NOTIFY_RESET, NULL);
 	cancel_delayed_work_sync(&sbuf->notify_work);
 	for (i = 0; i < sbuf->ringnr; i++) {
 		struct sbuf_ring *ring = &sbuf->rings[i];
@@ -832,6 +833,8 @@ int sbuf_uart_backend_create(struct sbuf_uart_backend **out)
 	sbuf->channel = SMSG_CH_COMM;
 	sbuf->uart_backend = backend;
 	spin_lock_init(&sbuf->state_lock);
+	kref_init(&sbuf->ref);
+	BLOCKING_INIT_NOTIFIER_HEAD(&sbuf->events);
 	mutex_init(&sbuf->control_lock);
 	atomic_set(&sbuf->generation, 0);
 	init_completion(&backend->exited);
@@ -1133,6 +1136,8 @@ static int sbuf_thread(void *data)
 		spin_lock_irqsave(&sbuf->state_lock, flags);
 		WRITE_ONCE(sbuf->state, SBUF_STATE_READY);
 		spin_unlock_irqrestore(&sbuf->state_lock, flags);
+		blocking_notifier_call_chain(&sbuf->events, SBUF_NOTIFY_READY,
+					     NULL);
 	}
 
 	/* sbuf init done, handle the ring rx events */
@@ -1223,6 +1228,9 @@ static int sbuf_thread(void *data)
 				sbuf_uart_notify(
 					sbuf, ring, SBUF_NOTIFY_WRITE,
 					atomic_read(&sbuf->generation));
+				blocking_notifier_call_chain(&sbuf->events,
+							     SBUF_NOTIFY_WRITE,
+							     &mrecv.value);
 				if (ring->handler)
 					ring->handler(SBUF_NOTIFY_WRITE,
 						      ring->data);
@@ -1237,6 +1245,9 @@ static int sbuf_thread(void *data)
 				sbuf_uart_notify(
 					sbuf, ring, SBUF_NOTIFY_READ,
 					atomic_read(&sbuf->generation));
+				blocking_notifier_call_chain(&sbuf->events,
+							     SBUF_NOTIFY_READ,
+							     &mrecv.value);
 				if (ring->handler)
 					ring->handler(SBUF_NOTIFY_READ,
 						      ring->data);
@@ -1307,6 +1318,8 @@ static int sbuf_create_legacy(u8 dst, u8 channel, u32 bufnum, u32 txbufsize,
 	sbuf->state = SBUF_STATE_IDLE;
 	atomic_set(&sbuf->generation, 0);
 	spin_lock_init(&sbuf->state_lock);
+	kref_init(&sbuf->ref);
+	BLOCKING_INIT_NOTIFIER_HEAD(&sbuf->events);
 	mutex_init(&sbuf->control_lock);
 	INIT_DELAYED_WORK(&sbuf->notify_work, sbuf_notify_work);
 	sbuf->dst = dst;
@@ -1382,6 +1395,85 @@ void sbuf_set_no_need_wake_lock(u8 dst, u8 channel, u32 bufnum)
 }
 EXPORT_SYMBOL_GPL(sbuf_set_no_need_wake_lock);
 
+static void sbuf_manager_release(struct kref *ref)
+{
+	struct sbuf_mgr *sbuf = container_of(ref, struct sbuf_mgr, ref);
+
+	kfree(sbuf->rings);
+	kfree(sbuf);
+}
+
+struct sbuf_mgr *sbuf_get_manager(u8 dst, u8 channel)
+{
+	struct sbuf_mgr *sbuf = sbufs[dst][sipc_channel2index(channel)];
+
+	kref_get(&sbuf->ref);
+	return sbuf;
+}
+
+void sbuf_put_manager(struct sbuf_mgr *sbuf)
+{
+	kref_put(&sbuf->ref, sbuf_manager_release);
+}
+
+static int sbuf_session_status(struct sbuf_mgr *sbuf, u32 generation,
+			       const bool *dead)
+{
+	if (READ_ONCE(sbuf->stopping))
+		return -ENODEV;
+	if ((dead && READ_ONCE(*dead)) ||
+	    READ_ONCE(sbuf->state) != SBUF_STATE_READY ||
+	    generation != atomic_read(&sbuf->generation))
+		return -EPIPE;
+	return 0;
+}
+
+int sbuf_session_state(struct sbuf_mgr *sbuf, u32 *generation)
+{
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&sbuf->state_lock, flags);
+	*generation = atomic_read(&sbuf->generation);
+	ret = sbuf_session_status(sbuf, *generation, NULL);
+	spin_unlock_irqrestore(&sbuf->state_lock, flags);
+	return ret;
+}
+
+/* Frontend registration rollback can revoke an opened cdev without changing
+ * the peer's communication session. Serialize revocation with ring commits.
+ */
+void sbuf_session_cancel(struct sbuf_mgr *sbuf, u32 id, bool *dead)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sbuf->state_lock, flags);
+	WRITE_ONCE(*dead, true);
+	spin_unlock_irqrestore(&sbuf->state_lock, flags);
+	wake_up_interruptible_all(&sbuf->rings[id].txwait);
+	wake_up_interruptible_all(&sbuf->rings[id].rxwait);
+}
+
+static int sbuf_session_commit(struct sbuf_mgr *sbuf, u32 generation,
+			       const bool *dead, u32 *pointer, u32 count,
+			       bool tx)
+{
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&sbuf->state_lock, flags);
+	ret = sbuf_session_status(sbuf, generation, dead);
+	if (!ret) {
+		if (tx)
+			wmb();
+		else
+			mb();
+		WRITE_ONCE(*pointer, READ_ONCE(*pointer) + count);
+	}
+	spin_unlock_irqrestore(&sbuf->state_lock, flags);
+	return ret;
+}
+
 void sbuf_destroy(u8 dst, u8 channel)
 {
 	struct sbuf_mgr *sbuf;
@@ -1430,7 +1522,6 @@ void sbuf_destroy(u8 dst, u8 channel)
 			wakeup_source_unregister(sbuf->rings[i].tx_wake_lock);
 			wakeup_source_unregister(sbuf->rings[i].rx_wake_lock);
 		}
-		kfree(sbuf->rings);
 	}
 
 	if (sbuf->smem_virt)
@@ -1442,7 +1533,7 @@ void sbuf_destroy(u8 dst, u8 channel)
 	else
 		smem_free(dst, sbuf->smem_addr, sbuf->smem_size);
 
-	kfree(sbuf);
+	sbuf_put_manager(sbuf);
 
 	sbufs[dst][ch_index] = NULL;
 	smsg_uart_legacy_sbuf_release(dst, channel);
@@ -1452,7 +1543,8 @@ EXPORT_SYMBOL_GPL(sbuf_destroy);
 static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 			     int timeout, bool user_buffer,
 			     bool check_generation, u32 expected_generation,
-			     struct sbuf_uart_notifier *uart)
+			     struct sbuf_uart_notifier *uart,
+			     struct sbuf_mgr *managed, const bool *dead)
 {
 	struct sbuf_mgr *sbuf;
 	struct sbuf_ring *ring = NULL;
@@ -1474,15 +1566,17 @@ static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 		return -EINVAL;
 	}
 
-	sbuf = uart ? uart->sbuf :
-		      (dst < SIPC_ID_NR ? sbufs[dst][ch_index] : NULL);
+	sbuf = managed ? managed :
+	       uart    ? uart->sbuf :
+			 (dst < SIPC_ID_NR ? sbufs[dst][ch_index] : NULL);
 	if (!sbuf)
 		return -ENODEV;
 	/* Exclusive UART ownership also rejects mixed legacy data calls. */
 	if (!uart && READ_ONCE(sbuf->uart_owner))
 		return -EBUSY;
-	generation = uart ? atomic_read(&sbuf->generation) : 0;
-	if (uart && check_generation && generation != expected_generation)
+	generation = atomic_read(&sbuf->generation);
+	if ((dead && READ_ONCE(*dead)) ||
+	    (check_generation && generation != expected_generation))
 		return -EPIPE;
 	if (bufid >= sbuf->ringnr || !sbuf->rings)
 		return -EINVAL;
@@ -1490,15 +1584,15 @@ static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 	hd_op = &ring->header_op;
 	if (!hd_op->tx_size)
 		return -EOPNOTSUPP;
+	if (READ_ONCE(sbuf->stopping))
+		return -ENODEV;
 	if (sbuf->state != SBUF_STATE_READY) {
 		pr_info("sbuf-%d-%d not ready to write!\n", dst, channel);
-		return -ENODEV;
+		return check_generation ? -EPIPE : -ENODEV;
 	}
 
 	pr_debug("%s: dst=%d, channel=%d, bufid=%d, len=%d, timeout=%d\n",
 		 __func__, dst, channel, bufid, len, timeout);
-	pr_debug("%s: channel=%d, wrptr=%d, rdptr=%d\n", __func__, channel,
-		 READ_ONCE(*hd_op->tx_wt_p), READ_ONCE(*hd_op->tx_rd_p));
 
 	rval = 0;
 	left = len;
@@ -1513,6 +1607,13 @@ static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 				dst, channel, bufid);
 			return -EBUSY;
 		}
+	}
+
+	/* reset marks the session dead before joining these locks. */
+	rval = sbuf_session_status(sbuf, generation, dead);
+	if (rval) {
+		mutex_unlock(&ring->txlock);
+		return rval;
 	}
 
 #if defined(SIPC_DEBUG_SBUF_RDWT_OWNER)
@@ -1535,15 +1636,16 @@ static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 			ring->txwait,
 			(int)(READ_ONCE(*hd_op->tx_wt_p) -
 			      READ_ONCE(*hd_op->tx_rd_p)) < hd_op->tx_size ||
-				(READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
-				 (uart &&
-				  generation !=
-					  atomic_read(&sbuf->generation))));
+				((dead && READ_ONCE(*dead)) ||
+				 READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
+				 (generation !=
+				  atomic_read(&sbuf->generation))));
 		if (rval < 0)
 			pr_debug("%s: wait interrupted!\n", __func__);
 
-		if ((READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
-		     (uart && generation != atomic_read(&sbuf->generation)))) {
+		if (((dead && READ_ONCE(*dead)) ||
+		     READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
+		     (generation != atomic_read(&sbuf->generation)))) {
 			pr_err("%s: sbuf state is idle!\n", __func__);
 			rval = -EPIPE;
 		}
@@ -1553,9 +1655,9 @@ static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 			ring->txwait,
 			(int)(READ_ONCE(*hd_op->tx_wt_p) -
 			      READ_ONCE(*hd_op->tx_rd_p)) < hd_op->tx_size ||
-				(READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
-				 (uart &&
-				  generation != atomic_read(&sbuf->generation))),
+				((dead && READ_ONCE(*dead)) ||
+				 READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
+				 (generation != atomic_read(&sbuf->generation))),
 			timeout);
 		if (rval < 0) {
 			pr_debug("%s: wait interrupted!\n", __func__);
@@ -1564,8 +1666,9 @@ static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 			rval = -ETIME;
 		}
 
-		if ((READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
-		     (uart && generation != atomic_read(&sbuf->generation)))) {
+		if (((dead && READ_ONCE(*dead)) ||
+		     READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
+		     (generation != atomic_read(&sbuf->generation)))) {
 			pr_err("%s: sbuf state is idle!\n", __func__);
 			rval = -EPIPE;
 		}
@@ -1574,8 +1677,9 @@ static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 	while (rval >= 0 && left &&
 	       (int)(READ_ONCE(*hd_op->tx_wt_p) - READ_ONCE(*hd_op->tx_rd_p)) <
 		       hd_op->tx_size &&
-	       (READ_ONCE(sbuf->state) == SBUF_STATE_READY &&
-		(!uart || generation == atomic_read(&sbuf->generation)))) {
+	       ((!dead || !READ_ONCE(*dead)) &&
+		READ_ONCE(sbuf->state) == SBUF_STATE_READY &&
+		(generation == atomic_read(&sbuf->generation)))) {
 		if ((u32)(READ_ONCE(*hd_op->tx_wt_p) -
 			  READ_ONCE(*hd_op->tx_rd_p)) > hd_op->tx_size) {
 			rval = -EIO;
@@ -1625,22 +1729,12 @@ static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 		pr_debug("%s: channel=%d, txpos=%p, txsize=%d\n", __func__,
 			 channel, txpos, txsize);
 
-		if (uart) {
-			rval = sbuf_uart_commit(uart, generation,
-						hd_op->tx_wt_p, txsize, true);
-			if (rval)
-				break;
-		} else {
-			if (READ_ONCE(sbuf->state) != SBUF_STATE_READY) {
-				rval = -EPIPE;
-				break;
-			}
-			/* Publish payload before handing bytes to the CP. */
-			wmb();
-			/* update tx wrptr */
-			WRITE_ONCE(*hd_op->tx_wt_p,
-				   READ_ONCE(*hd_op->tx_wt_p) + txsize);
-		}
+		rval = uart ? sbuf_uart_commit(uart, generation, hd_op->tx_wt_p,
+					       txsize, true) :
+			      sbuf_session_commit(sbuf, generation, dead,
+						  hd_op->tx_wt_p, txsize, true);
+		if (rval)
+			break;
 		/* tx ringbuf is empty, so need to notify peer side */
 		if (READ_ONCE(*hd_op->tx_wt_p) - READ_ONCE(*hd_op->tx_rd_p) ==
 		    txsize)
@@ -1670,9 +1764,9 @@ static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 			__pm_relax(ring->tx_wake_lock);
 		}
 	}
-	if (len == left &&
-	    ((uart && generation != atomic_read(&sbuf->generation)) ||
-	     READ_ONCE(sbuf->state) != SBUF_STATE_READY))
+	if (len == left && ((dead && READ_ONCE(*dead)) ||
+			    generation != atomic_read(&sbuf->generation) ||
+			    READ_ONCE(sbuf->state) != SBUF_STATE_READY))
 		rval = -EPIPE;
 	mutex_unlock(&ring->txlock);
 
@@ -1688,7 +1782,7 @@ static int sbuf_write_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 int sbuf_write(u8 dst, u8 channel, u32 bufid, void *buf, u32 len, int timeout)
 {
 	return sbuf_write_common(dst, channel, bufid, buf, len, timeout, false,
-				 false, 0, NULL);
+				 false, 0, NULL, NULL, NULL);
 }
 EXPORT_SYMBOL_GPL(sbuf_write);
 
@@ -1696,14 +1790,15 @@ int sbuf_write_user(u8 dst, u8 channel, u32 bufid, const void __user *buf,
 		    u32 len, int timeout)
 {
 	return sbuf_write_common(dst, channel, bufid, (void __force *)buf, len,
-				 timeout, true, false, 0, NULL);
+				 timeout, true, false, 0, NULL, NULL, NULL);
 }
 EXPORT_SYMBOL_GPL(sbuf_write_user);
 
 static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 			    int timeout, bool user_buffer,
 			    bool check_generation, u32 expected_generation,
-			    struct sbuf_uart_notifier *uart)
+			    struct sbuf_uart_notifier *uart,
+			    struct sbuf_mgr *managed, const bool *dead)
 {
 	struct sbuf_mgr *sbuf;
 	struct sbuf_ring *ring = NULL;
@@ -1724,15 +1819,17 @@ static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 		pr_err("%s:channel %d invalid!\n", __func__, channel);
 		return -EINVAL;
 	}
-	sbuf = uart ? uart->sbuf :
-		      (dst < SIPC_ID_NR ? sbufs[dst][ch_index] : NULL);
+	sbuf = managed ? managed :
+	       uart    ? uart->sbuf :
+			 (dst < SIPC_ID_NR ? sbufs[dst][ch_index] : NULL);
 	if (!sbuf)
 		return -ENODEV;
 	/* Exclusive UART ownership also rejects mixed legacy data calls. */
 	if (!uart && READ_ONCE(sbuf->uart_owner))
 		return -EBUSY;
-	generation = uart ? atomic_read(&sbuf->generation) : 0;
-	if (uart && check_generation && generation != expected_generation)
+	generation = atomic_read(&sbuf->generation);
+	if ((dead && READ_ONCE(*dead)) ||
+	    (check_generation && generation != expected_generation))
 		return -EPIPE;
 	if (bufid >= sbuf->ringnr || !sbuf->rings)
 		return -EINVAL;
@@ -1741,15 +1838,15 @@ static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 	if (!hd_op->rx_size)
 		return -EOPNOTSUPP;
 
+	if (READ_ONCE(sbuf->stopping))
+		return -ENODEV;
 	if (sbuf->state != SBUF_STATE_READY) {
 		pr_debug("sbuf-%d-%d not ready to read!\n", dst, channel);
-		return -ENODEV;
+		return check_generation ? -EPIPE : -ENODEV;
 	}
 
 	pr_debug("%s:dst=%d, channel=%d, bufid=%d, len=%d, timeout=%d\n",
 		 __func__, dst, channel, bufid, len, timeout);
-	pr_debug("%s: channel=%d, wrptr=%d, rdptr=%d\n", __func__, channel,
-		 READ_ONCE(*hd_op->rx_wt_p), READ_ONCE(*hd_op->rx_rd_p));
 
 	rval = 0;
 	left = len;
@@ -1763,6 +1860,13 @@ static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 				 __func__, dst, channel, bufid);
 			return -EBUSY;
 		}
+	}
+
+	/* reset marks the session dead before joining these locks. */
+	rval = sbuf_session_status(sbuf, generation, dead);
+	if (rval) {
+		mutex_unlock(&ring->rxlock);
+		return rval;
 	}
 
 #if defined(SIPC_DEBUG_SBUF_RDWT_OWNER)
@@ -1783,18 +1887,17 @@ static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 				ring->rxwait,
 				READ_ONCE(*hd_op->rx_wt_p) !=
 						READ_ONCE(*hd_op->rx_rd_p) ||
-					(READ_ONCE(sbuf->state) ==
+					((dead && READ_ONCE(*dead)) ||
+					 READ_ONCE(sbuf->state) ==
 						 SBUF_STATE_IDLE ||
-					 (uart &&
-					  generation !=
-						  atomic_read(
-							  &sbuf->generation))));
+					 (generation !=
+					  atomic_read(&sbuf->generation))));
 			if (rval < 0)
 				pr_debug("%s: wait interrupted!\n", __func__);
 
-			if ((READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
-			     (uart &&
-			      generation != atomic_read(&sbuf->generation)))) {
+			if (((dead && READ_ONCE(*dead)) ||
+			     READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
+			     (generation != atomic_read(&sbuf->generation)))) {
 				pr_err("%s: sbuf state is idle!\n", __func__);
 				rval = -EPIPE;
 			}
@@ -1804,12 +1907,11 @@ static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 				ring->rxwait,
 				READ_ONCE(*hd_op->rx_wt_p) !=
 						READ_ONCE(*hd_op->rx_rd_p) ||
-					(READ_ONCE(sbuf->state) ==
+					((dead && READ_ONCE(*dead)) ||
+					 READ_ONCE(sbuf->state) ==
 						 SBUF_STATE_IDLE ||
-					 (uart &&
-					  generation !=
-						  atomic_read(
-							  &sbuf->generation))),
+					 (generation !=
+					  atomic_read(&sbuf->generation))),
 				timeout);
 			if (rval < 0) {
 				pr_debug("%s: wait interrupted!\n", __func__);
@@ -1818,9 +1920,9 @@ static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 				rval = -ETIME;
 			}
 
-			if ((READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
-			     (uart &&
-			      generation != atomic_read(&sbuf->generation)))) {
+			if (((dead && READ_ONCE(*dead)) ||
+			     READ_ONCE(sbuf->state) == SBUF_STATE_IDLE ||
+			     (generation != atomic_read(&sbuf->generation)))) {
 				pr_err("%s: state is idle!\n", __func__);
 				rval = -EPIPE;
 			}
@@ -1829,8 +1931,9 @@ static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 
 	while (rval >= 0 && left &&
 	       (READ_ONCE(*hd_op->rx_wt_p) != READ_ONCE(*hd_op->rx_rd_p)) &&
-	       (READ_ONCE(sbuf->state) == SBUF_STATE_READY &&
-		(!uart || generation == atomic_read(&sbuf->generation)))) {
+	       ((!dead || !READ_ONCE(*dead)) &&
+		READ_ONCE(sbuf->state) == SBUF_STATE_READY &&
+		(generation == atomic_read(&sbuf->generation)))) {
 		/* Observe the CP producer pointer before reading its payload. */
 		rmb();
 		/* calc rxpos & rxsize */
@@ -1890,22 +1993,13 @@ static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 			}
 		}
 
-		if (uart) {
-			rval = sbuf_uart_commit(uart, generation,
-						hd_op->rx_rd_p, rxsize, false);
-			if (rval)
-				break;
-		} else {
-			if (READ_ONCE(sbuf->state) != SBUF_STATE_READY) {
-				rval = -EPIPE;
-				break;
-			}
-			/* Complete payload accesses before releasing the CP ring space. */
-			mb();
-			/* update rx rdptr */
-			WRITE_ONCE(*hd_op->rx_rd_p,
-				   READ_ONCE(*hd_op->rx_rd_p) + rxsize);
-		}
+		rval = uart ? sbuf_uart_commit(uart, generation, hd_op->rx_rd_p,
+					       rxsize, false) :
+			      sbuf_session_commit(sbuf, generation, dead,
+						  hd_op->rx_rd_p, rxsize,
+						  false);
+		if (rval)
+			break;
 		/* rx ringbuf is full ,so need to notify peer side */
 		if (READ_ONCE(*hd_op->rx_wt_p) - READ_ONCE(*hd_op->rx_rd_p) ==
 		    hd_op->rx_size - rxsize) {
@@ -1937,9 +2031,9 @@ static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 		}
 	}
 
-	if (len == left &&
-	    ((uart && generation != atomic_read(&sbuf->generation)) ||
-	     READ_ONCE(sbuf->state) != SBUF_STATE_READY))
+	if (len == left && ((dead && READ_ONCE(*dead)) ||
+			    generation != atomic_read(&sbuf->generation) ||
+			    READ_ONCE(sbuf->state) != SBUF_STATE_READY))
 		rval = -EPIPE;
 	mutex_unlock(&ring->rxlock);
 
@@ -1954,7 +2048,7 @@ static int sbuf_read_common(u8 dst, u8 channel, u32 bufid, void *buf, u32 len,
 int sbuf_read(u8 dst, u8 channel, u32 bufid, void *buf, u32 len, int timeout)
 {
 	return sbuf_read_common(dst, channel, bufid, buf, len, timeout, false,
-				false, 0, NULL);
+				false, 0, NULL, NULL, NULL);
 }
 EXPORT_SYMBOL_GPL(sbuf_read);
 
@@ -1962,9 +2056,51 @@ int sbuf_read_user(u8 dst, u8 channel, u32 bufid, void __user *buf, u32 len,
 		   int timeout)
 {
 	return sbuf_read_common(dst, channel, bufid, (void __force *)buf, len,
-				timeout, true, false, 0, NULL);
+				timeout, true, false, 0, NULL, NULL, NULL);
 }
 EXPORT_SYMBOL_GPL(sbuf_read_user);
+
+int sbuf_session_read(struct sbuf_mgr *sbuf, u32 generation, const bool *dead,
+		      u32 ring, void *buf, u32 len, int timeout, bool user)
+{
+	return sbuf_read_common(sbuf->dst, sbuf->channel, ring, buf, len,
+				timeout, user, true, generation, NULL, sbuf,
+				dead);
+}
+
+int sbuf_session_write(struct sbuf_mgr *sbuf, u32 generation, const bool *dead,
+		       u32 ring, const void *buf, u32 len, int timeout,
+		       bool user)
+{
+	return sbuf_write_common(sbuf->dst, sbuf->channel, ring, (void *)buf,
+				 len, timeout, user, true, generation, NULL,
+				 sbuf, dead);
+}
+
+__poll_t sbuf_session_poll(struct sbuf_mgr *sbuf, u32 generation,
+			   const bool *dead, u32 id, struct file *file,
+			   poll_table *wait)
+{
+	struct sbuf_ring *ring = &sbuf->rings[id];
+	struct sbuf_ring_header_op *hd = &ring->header_op;
+	unsigned long flags;
+	__poll_t mask = 0;
+
+	poll_wait(file, &ring->rxwait, wait);
+	poll_wait(file, &ring->txwait, wait);
+	spin_lock_irqsave(&sbuf->state_lock, flags);
+	if (sbuf_session_status(sbuf, generation, dead)) {
+		mask = EPOLLERR | EPOLLHUP;
+	} else {
+		if (READ_ONCE(*hd->rx_wt_p) != READ_ONCE(*hd->rx_rd_p))
+			mask |= EPOLLIN | EPOLLRDNORM;
+		if (READ_ONCE(*hd->tx_wt_p) - READ_ONCE(*hd->tx_rd_p) <
+		    hd->tx_size)
+			mask |= EPOLLOUT | EPOLLWRNORM;
+	}
+	spin_unlock_irqrestore(&sbuf->state_lock, flags);
+	return mask;
+}
 
 int sbuf_get_session(u8 dst, u8 channel, u32 *generation, u32 *state)
 {
@@ -2367,7 +2503,8 @@ int sbuf_uart_try_read(struct sbuf_uart_notifier *uart, u32 generation,
 	if (ret)
 		return ret;
 	ret = sbuf_read_common(uart->sbuf->dst, uart->sbuf->channel, 0, buf,
-			       len, 0, false, true, generation, uart);
+			       len, 0, false, true, generation, uart, NULL,
+			       NULL);
 	sbuf_uart_io_put(uart);
 	return ret;
 }
@@ -2385,7 +2522,8 @@ int sbuf_uart_try_ack(struct sbuf_uart_notifier *uart, u32 generation)
 	if (ret)
 		return ret;
 	ret = sbuf_write_common(uart->sbuf->dst, uart->sbuf->channel, 0, &ack,
-				1, 0, false, true, generation, uart);
+				1, 0, false, true, generation, uart, NULL,
+				NULL);
 	sbuf_uart_io_put(uart);
 	return ret; /* 1 committed, <0 not committed; never automatically retry. */
 }

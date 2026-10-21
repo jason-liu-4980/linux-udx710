@@ -25,6 +25,13 @@ config SPRD_SIPC_MBOX_CLIENT
 config SPRD_SIPC_SPIPE
 	bool "SIPC SBUF character devices"
 
+config SPRD_SIPC_WWAN
+	bool "UDX710 native SBUF WWAN AT ports"
+	depends on WWAN=y
+	help
+	  Expose the original channel 6 URC and command rings as two WWAN
+	  AT ports, grouped with SIPA under the modem platform device.
+
 config SPRD_SIPC_SPOOL
 	bool "SIPC SBLOCK character devices"
 

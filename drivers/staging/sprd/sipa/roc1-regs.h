@@ -5,8 +5,8 @@
  * Copyright C 2018, Spreadtrum Communications Inc.
  */
 
-#ifndef __DT_BINDINGS_SPRD_GLB_REGS_H
-#define __DT_BINDINGS_SPRD_GLB_REGS_H
+#ifndef _SPRD_SIPA_ROC1_REGS_H
+#define _SPRD_SIPA_ROC1_REGS_H
 
 #define REG_AI_APB_APB_RST 0x0004
 #define REG_AI_APB_GEN_CLK_CFG 0x0008

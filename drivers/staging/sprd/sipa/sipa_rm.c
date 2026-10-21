@@ -141,19 +141,6 @@ static void sipa_rm_inactivity_timer_func(struct work_struct *work)
 }
 
 /**
- * sipa_rm_is_initialized() - check sipa_rm is initialized
- *
- * Returns: true on initialized
- *
- * This function is called to check sipa_rm is initialized
- */
-bool sipa_rm_is_initialized(void)
-{
-	/* External peers may enter only after the full SIPA context is published. */
-	return sipa_rm_ctx && sipa_get_pdev();
-}
-
-/**
  * sipa_rm_create_resource() - create resource
  * @create_params: [in] parameters needed
  *                  for resource initialization

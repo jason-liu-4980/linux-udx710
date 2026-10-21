@@ -686,7 +686,9 @@ void wwan_remove_port(struct wwan_port *port)
 	mutex_lock(&port->ops_lock);
 	if (port->start_count) {
 		port->ops->stop(port);
-		port->start_count = 0;
+		/* Open files retain the count: final close must still purge RX,
+		 * including a partial read requeued concurrently with removal.
+		 */
 	}
 	port->ops = NULL; /* Prevent any new port operations (e.g. from fops) */
 	mutex_unlock(&port->ops_lock);

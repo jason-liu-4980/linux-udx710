@@ -19,6 +19,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/of_device.h>
 #include <linux/mfd/syscon.h>
@@ -1133,18 +1134,22 @@ out:
 }
 EXPORT_SYMBOL(sipa_set_enabled);
 
-/* Bind USB resource policy to the actual modem transport node.  A missing
- * declaration keeps cellular/AP transport usable but rejects USB offload.
+/* Local CP resource type comes from this SIPA's match data. Only the PCIe
+ * topology needs a peer declaration; neither path implies a remote grant.
  */
 static int sipa_parse_usb_transport(struct device *dev,
-				    struct sipa_plat_drv_cfg *cfg)
+				    struct sipa_plat_drv_cfg *cfg,
+				    const struct sipa_hw_data *pdata)
 {
 	struct device_node *peer, *rc;
-	struct of_phandle_args mbox;
 	const char *type;
-	u32 dst, core, ep;
+	u32 dst, ep;
 	int ret = -EINVAL;
 
+	if (!cfg->need_through_pcie) {
+		cfg->usb_remote_prod = pdata->local_usb_prod;
+		return 0;
+	}
 	cfg->usb_remote_prod = -ENODEV;
 	peer = of_parse_phandle(dev->of_node, "sprd,cp-transport", 0);
 	if (!peer)
@@ -1154,26 +1159,7 @@ static int sipa_parse_usb_transport(struct device *dev,
 	    of_property_read_string(peer, "sprd,type", &type) ||
 	    of_property_read_u32(peer, "sprd,dst", &dst))
 		goto put;
-	if (!strcmp(type, "mbox")) {
-		/* The local CP delegate is explicitly PSCP dst5/core2. */
-		if (cfg->need_through_pcie || cfg->standalone_subsys ||
-		    dst != 5 ||
-		    of_property_read_u32(peer, "sprd,core", &core) || core != 2)
-			goto put;
-		ret = of_parse_phandle_with_args(peer, "mboxes", "#mbox-cells",
-						 0, &mbox);
-		if (ret)
-			goto put;
-		ret = mbox.args_count == 1 && mbox.args[0] == core &&
-				      of_device_is_available(mbox.np) &&
-				      of_device_is_compatible(
-					      mbox.np, "sprd,orca-mailbox") ?
-			      0 :
-			      -EINVAL;
-		of_node_put(mbox.np);
-		if (!ret)
-			cfg->usb_remote_prod = SIPA_RM_RES_PROD_CP;
-	} else if (!strcmp(type, "pcie")) {
+	if (!strcmp(type, "pcie")) {
 		/* This only identifies the dependency.  A real host-resource
 		 * producer must still be registered and grant every request.
 		 */
@@ -1256,7 +1242,7 @@ static int sipa_parse_dts_configuration(struct platform_device *pdev,
 	cfg->need_through_pcie = of_property_read_bool(
 		pdev->dev.of_node, "sprd,need-through-pcie");
 
-	ret = sipa_parse_usb_transport(&pdev->dev, cfg);
+	ret = sipa_parse_usb_transport(&pdev->dev, cfg, pdata);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret,
 				     "invalid CP transport topology\n");
@@ -1733,11 +1719,41 @@ static void sipa_prepare_suspend_work(struct work_struct *work)
 	}
 }
 
+static void sipa_put_modem(void *data)
+{
+	put_device(data);
+}
+
+static int sipa_modem_parent(struct device *dev, struct device **parent)
+{
+	struct fwnode_handle *node;
+	int ret;
+
+	node = fwnode_find_reference(dev_fwnode(dev), "sprd,modem", 0);
+	if (IS_ERR(node))
+		return PTR_ERR(node);
+	*parent = bus_find_device_by_fwnode(&platform_bus_type, node);
+	fwnode_handle_put(node);
+	if (!*parent)
+		return -EPROBE_DEFER;
+	if (!device_is_bound(*parent)) {
+		put_device(*parent);
+		return -EPROBE_DEFER;
+	}
+	ret = devm_add_action_or_reset(dev, sipa_put_modem, *parent);
+	if (ret)
+		return ret;
+	if (!device_link_add(dev, *parent, DL_FLAG_AUTOREMOVE_CONSUMER))
+		return -EINVAL;
+	return 0;
+}
+
 static int sipa_plat_drv_probe(struct platform_device *pdev_p)
 {
 	int ret;
 	struct device *dev = &pdev_p->dev;
 	struct sipa_control *ctrl;
+	struct device *modem;
 	/*
 	 * SIPA probe function can be called for multiple times as the same probe
 	 * function handles multiple compatibilities
@@ -1747,6 +1763,9 @@ static int sipa_plat_drv_probe(struct platform_device *pdev_p)
 
 	if (READ_ONCE(s_sipa_ctrl))
 		return -EBUSY;
+	ret = sipa_modem_parent(dev, &modem);
+	if (ret)
+		return ret;
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(40));
 	if (ret)
 		return ret;
@@ -1763,20 +1782,14 @@ static int sipa_plat_drv_probe(struct platform_device *pdev_p)
 	ret = sipa_parse_dts_configuration(pdev_p, &ctrl->params_cfg);
 	if (ret) {
 		dev_err(dev, "sipa: dts parsing failed\n");
-		WRITE_ONCE(s_sipa_ctrl, NULL);
-		dev_set_drvdata(dev, NULL);
-		kfree(ctrl);
-		return ret;
+		goto free_ctrl;
 	}
 
 	ctrl->suspend_stage = SIPA_SUSPEND_MASK;
 	ret = ipa_pre_init(&ctrl->params_cfg);
 	if (ret) {
 		dev_err(dev, "sipa: pre init failed\n");
-		WRITE_ONCE(s_sipa_ctrl, NULL);
-		dev_set_drvdata(dev, NULL);
-		kfree(ctrl);
-		return ret;
+		goto free_ctrl;
 	}
 
 	mutex_init(&ctrl->resume_lock);
@@ -1786,19 +1799,34 @@ static int sipa_plat_drv_probe(struct platform_device *pdev_p)
 	ctrl->power_wq = create_workqueue("sipa_power_wq");
 	if (!ctrl->power_wq) {
 		dev_err(dev, "sipa power wq create failed\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto free_ctrl;
 	}
+
+	/* Until sipa_init publishes ctx, link open returns -EPROBE_DEFER. */
+	ret = sipa_eth_init(modem, ctrl);
+	if (ret)
+		goto destroy_wq;
 
 	ret = sipa_init(&ctrl->ctx, &ctrl->params_cfg, dev);
 	if (ret) {
 		dev_err(dev, "sipa: sipa_init failed %d\n", ret);
-		return ret;
+		sipa_eth_exit(modem);
+		goto destroy_wq;
 	}
 
 	device_init_wakeup(dev, true);
 	sipa_init_debugfs(&ctrl->params_cfg, ctrl);
 
 	return 0;
+
+destroy_wq:
+	destroy_workqueue(ctrl->power_wq);
+free_ctrl:
+	WRITE_ONCE(s_sipa_ctrl, NULL);
+	dev_set_drvdata(dev, NULL);
+	kfree(ctrl);
+	return ret;
 }
 
 /* Since different sipa of orca/roc1 series can have different register
@@ -1809,12 +1837,14 @@ static struct sipa_hw_data roc1_defs_data = {
 	.ahb_reg = sipa_roc1_ahb_regmap,
 	.ahb_regnum = ROC1_AHB_MAX_REG,
 	.standalone_subsys = true,
+	.local_usb_prod = -ENODEV,
 };
 
 static struct sipa_hw_data orca_defs_data = {
 	.ahb_reg = sipa_orca_ahb_regmap,
 	.ahb_regnum = ORCA_AHB_MAX_REG,
 	.standalone_subsys = false,
+	.local_usb_prod = SIPA_RM_RES_PROD_CP,
 };
 
 static const struct of_device_id sipa_plat_drv_match[] = {

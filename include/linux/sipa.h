@@ -334,7 +334,6 @@ struct sipa_rm_perf_profile {
 int sipa_register_ipa_ready_cb(void (*sipa_ready_cb)(void *user_data),
 			       void *user_data);
 
-bool sipa_rm_is_initialized(void);
 
 int sipa_set_enabled(bool enable);
 

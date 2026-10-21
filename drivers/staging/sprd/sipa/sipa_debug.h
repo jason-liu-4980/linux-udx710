@@ -16,7 +16,7 @@
 
 #ifndef __SIPA_ROC1_LINUX_DEBUG_H__
 #define __SIPA_ROC1_LINUX_DEBUG_H__
-#include <dt-bindings/soc/sprd,roc1-regs.h>
+#include "roc1-regs.h"
 
 #include "sipa_priv.h"
 #include "sipa_hal_priv.h"

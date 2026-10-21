@@ -306,5 +306,4 @@ struct sipa_hal_context {
 u32 sipa_int_callback_func(int evt, void *cookie);
 u32 sipa_fifo_ops_init(struct sipa_hal_fifo_ops *ops);
 u32 sipa_glb_ops_init(struct sipa_hal_global_ops *ops);
-u32 sipa_sys_proc_init(struct sipa_sys_ops *ops);
 #endif

@@ -48,7 +48,6 @@ int sprd_pamu3_put(struct device *dev);
 /* Before controller pullup, acquire/wait/release a real network resource. */
 int sprd_pamu3_wait_ready(struct device *dev);
 int sprd_pamu3_arm(struct device *dev, struct usb_ep *out, struct usb_ep *in);
-int sprd_pamu3_pause(struct device *dev);
 void sprd_pamu3_quiesce_atomic(struct device *dev);
 /* Preparation allocates and programs disabled hardware; it is not a start. */
 int sprd_pamu3_prepare(struct device *dev);

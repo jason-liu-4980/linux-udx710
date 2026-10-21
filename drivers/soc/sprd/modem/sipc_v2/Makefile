@@ -3,10 +3,10 @@ obj-$(CONFIG_SPRD_SIPC_MBOX_CLIENT) += udx710_smsg_mbox.o
 obj-$(CONFIG_SPRD_SIPC)     += sipc.o smsg.o smem.o sbuf.o sblock.o sipc_debugfs.o
 
 obj-$(CONFIG_SPRD_SIPC_SPIPE)	+= spipe.o
+obj-$(CONFIG_SPRD_SIPC_WWAN)	+= sipc_wwan.o
 
 obj-$(CONFIG_SPRD_SIPC_SPOOL)	+= spool.o
 
-obj-$(CONFIG_SPRD_SIPC_ZERO_COPY_SIPX) += sipx.o
 
 # Standalone object validation only; ignored for normal in-tree builds.
 ifneq ($(KBUILD_EXTMOD),)

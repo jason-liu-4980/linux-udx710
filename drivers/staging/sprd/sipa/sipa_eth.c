@@ -27,13 +27,11 @@
 #include <linux/ipv6.h>
 #include <linux/udp.h>
 #include <linux/if_arp.h>
-#include <linux/platform_device.h>
+#include <linux/wwan.h>
 #include <linux/sched.h>
 #include <linux/kthread.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
-#include <linux/of_device.h>
-#include <linux/of.h>
 #include <linux/interrupt.h>
 #include "sipa_eth.h"
 #include "sipa_priv.h"
@@ -74,8 +72,7 @@ static int sipa_eth_prepare_skb(struct SIPA_ETH *sipa_eth, struct sk_buff *skb)
 	struct iphdr *iph;
 	struct ethhdr *peth;
 	struct net_device *dev;
-	struct sipa_eth_init_data *pdata = sipa_eth->pdata;
-	unsigned int offset = pdata->mac_h ? ETH_HLEN : 0;
+	unsigned int offset = sipa_eth->mac_h ? ETH_HLEN : 0;
 	u8 version;
 
 	dev = sipa_eth->netdev;
@@ -95,7 +92,7 @@ static int sipa_eth_prepare_skb(struct SIPA_ETH *sipa_eth, struct sk_buff *skb)
 	} else {
 		return -EPROTONOSUPPORT;
 	}
-	if (!pdata->mac_h && skb_cow_head(skb, ETH_HLEN))
+	if (!sipa_eth->mac_h && skb_cow_head(skb, ETH_HLEN))
 		return -ENOMEM;
 
 	/* eth is rawip */
@@ -116,7 +113,7 @@ static int sipa_eth_prepare_skb(struct SIPA_ETH *sipa_eth, struct sk_buff *skb)
 	 * because the information in the header room
 	 * is no longer useful for IP layer.
 	 */
-	if (pdata->mac_h) {
+	if (sipa_eth->mac_h) {
 		skb_reset_mac_header(skb);
 		peth = (struct ethhdr *)skb->data;
 	} else {
@@ -267,8 +264,7 @@ static void sipa_eth_notify_cb(void *priv, enum sipa_evt_type evt,
 
 static int sipa_eth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct SIPA_ETH *sipa_eth = netdev_priv(dev);
-	struct sipa_eth_init_data *pdata = sipa_eth->pdata;
+	struct SIPA_ETH *sipa_eth = wwan_netdev_drvpriv(dev);
 	struct sipa_eth_dtrans_stats *dt_stats;
 	int ret = 0;
 	int netid;
@@ -283,9 +279,9 @@ static int sipa_eth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		return NETDEV_TX_OK;
 	}
 
-	netid = pdata->netid;
+	netid = sipa_eth->netid;
 	/* eth is rawip, so pull 14 bytes */
-	if (!pdata->mac_h) {
+	if (!sipa_eth->mac_h) {
 		if (!pskb_may_pull(skb, ETH_HLEN))
 			goto err;
 		skb_pull_inline(skb, ETH_HLEN);
@@ -293,12 +289,12 @@ static int sipa_eth_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* Success transfers ownership: do not read skb after the call. */
 	payload_len = skb->len;
 
-	ret = sipa_nic_tx(sipa_eth->nic_id, pdata->term_type, netid, skb);
+	ret = sipa_nic_tx(sipa_eth->nic_id, sipa_eth->term_type, netid, skb);
 	if (unlikely(ret != 0)) {
 		pr_err("fail to send skb, ret %d\n", ret);
 		if (ret == -EAGAIN || ret == -EINPROGRESS) {
 			/* NETDEV_TX_BUSY leaves ownership with the networking stack. */
-			if (!pdata->mac_h)
+			if (!sipa_eth->mac_h)
 				skb_push(skb, ETH_HLEN);
 			dt_stats->tx_fail++;
 			sipa_eth->stats.tx_errors++;
@@ -325,13 +321,12 @@ err:
 /* Open interface */
 static int sipa_eth_open(struct net_device *dev)
 {
-	struct SIPA_ETH *sipa_eth = netdev_priv(dev);
-	struct sipa_eth_init_data *pdata = sipa_eth->pdata;
+	struct SIPA_ETH *sipa_eth = wwan_netdev_drvpriv(dev);
 	int ret = 0;
 
 	pr_info("open %s netid %d term_type %d mac_h %d\n", dev->name,
-		pdata->netid, pdata->term_type, pdata->mac_h);
-	ret = sipa_nic_open(pdata->term_type, pdata->netid, sipa_eth_notify_cb,
+		sipa_eth->netid, sipa_eth->term_type, sipa_eth->mac_h);
+	ret = sipa_nic_open(sipa_eth->term_type, sipa_eth->netid, sipa_eth_notify_cb,
 			    (void *)sipa_eth);
 
 	if (ret < 0)
@@ -361,7 +356,7 @@ static int sipa_eth_open(struct net_device *dev)
 /* Close interface */
 static int sipa_eth_close(struct net_device *dev)
 {
-	struct SIPA_ETH *sipa_eth = netdev_priv(dev);
+	struct SIPA_ETH *sipa_eth = wwan_netdev_drvpriv(dev);
 
 	pr_info("close %s!\n", dev->name);
 
@@ -376,7 +371,7 @@ static int sipa_eth_close(struct net_device *dev)
 
 static struct net_device_stats *sipa_eth_get_stats(struct net_device *dev)
 {
-	struct SIPA_ETH *sipa_eth = netdev_priv(dev);
+	struct SIPA_ETH *sipa_eth = wwan_netdev_drvpriv(dev);
 
 	return &sipa_eth->stats;
 }
@@ -406,180 +401,83 @@ int sipa_eth_flowtable_port(struct net_device *dev, u8 *port)
 }
 #endif
 
-static int sipa_eth_parse_dt(struct sipa_eth_init_data **init,
-			     struct device *dev)
+static void sipa_wwan_setup(struct net_device *dev)
 {
-	struct sipa_eth_init_data *pdata = NULL;
-	struct device_node *np = dev->of_node;
-	int ret;
-	u32 udata, id;
-	s32 sdata;
+	struct SIPA_ETH *sipa_eth = wwan_netdev_drvpriv(dev);
 
-	if (!np)
-		pr_err("dev of_node np is null\n");
-
-	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
-	if (!pdata)
-		return -ENOMEM;
-
-	id = of_alias_get_id(np, "eth");
-	switch (id) {
-	case 0 ... 7:
-		snprintf(pdata->name, IFNAMSIZ, "%s%d", SIPA_ETH_IFACE_PREF,
-			 id);
-		break;
-	default:
-		pr_err("wrong alias id from dts, id %d\n", id);
-		return -EINVAL;
-	}
-
-	ret = of_property_read_s32(np, "sprd,netid", &sdata);
-	if (ret) {
-		pr_err("read sprd,netid ret %d\n", ret);
-		return ret;
-	}
-	/* dts reflect */
-	pdata->netid = sdata - 1;
-
-	ret = of_property_read_u32(np, "sprd,term-type", &udata);
-	if (ret) {
-		pr_err("read sprd,term-type ret %d\n", ret);
-		return ret;
-	}
-
-	pdata->term_type = udata;
-
-	pdata->mac_h = of_property_read_bool(np, "sprd,mac-header");
-
-	*init = pdata;
-	pr_debug("after dt parse, name %s netid %d term-type %d mac_h %d\n",
-		 pdata->name, pdata->netid, pdata->term_type, pdata->mac_h);
-	return 0;
-}
-
-static void s_setup(struct net_device *dev)
-{
 	ether_setup(dev);
-	/*
-	 * avoid mdns to be send
-	 * also disable arp
-	 */
 	dev->flags &= ~(IFF_BROADCAST | IFF_MULTICAST);
-	/* Cellular IP has no ARP peer. Retain its required 14-byte DMA framing. */
 	dev->flags |= IFF_NOARP;
+	/* Preserve the 14-byte DMA framing while presenting cellular raw IP. */
+	dev->type = ARPHRD_RAWIP;
+	dev->netdev_ops = &sipa_eth_ops;
+	dev->watchdog_timeo = HZ;
+	dev->needs_free_netdev = true;
+	eth_hw_addr_random(dev);
+	sipa_eth->netdev = dev;
+	sipa_eth->term_type = SIPA_TERM_VCP;
+	sipa_eth->mac_h = true;
+	sipa_eth->state = DEV_OFF;
+	sipa_eth_dt_stats_init(&sipa_eth->dt_stats);
+	netif_napi_add_weight(dev, &sipa_eth->napi, sipa_eth_rx_poll_handler,
+			     SIPA_ETH_NAPI_WEIGHT);
+	netif_carrier_off(dev);
 }
 
-static int sipa_eth_probe(struct platform_device *pdev)
+static int sipa_wwan_newlink(void *ctxt, struct net_device *dev, u32 link_id,
+			   struct netlink_ext_ack *extack)
 {
-	struct sipa_eth_init_data *pdata = pdev->dev.platform_data;
-	struct net_device *netdev;
-	struct SIPA_ETH *sipa_eth;
-	char ifname[IFNAMSIZ];
+	struct sipa_control *ctrl = ctxt;
+	struct SIPA_ETH *sipa_eth = wwan_netdev_drvpriv(dev);
 	int ret;
 
-	if (pdev->dev.of_node && !pdata) {
-		ret = sipa_eth_parse_dt(&pdata, &pdev->dev);
-		if (ret) {
-			pr_err("failed to parse device tree, ret=%d\n", ret);
-			return ret;
-		}
-		pdev->dev.platform_data = pdata;
-	}
-
-	if (!pdata)
+	if (link_id >= 8)
 		return -EINVAL;
-	if (!sipa_get_ctrl_pointer() || !sipa_get_ctrl_pointer()->ctx)
-		return -EPROBE_DEFER;
-	strscpy(ifname, pdata->name, IFNAMSIZ);
-	netdev = alloc_netdev(sizeof(struct SIPA_ETH), ifname, NET_NAME_UNKNOWN,
-			      s_setup);
-
-	if (!netdev) {
-		pr_err("alloc_netdev() failed.\n");
-		return -ENOMEM;
-	}
-
-	/*
-	 * If net_device's type is ARPHRD_ETHER, the ipv6 interface identifier
-	 * specified by the network will be covered by addrconf_ifid_eui48,
-	 * this will casue ipv6 fail in some test environment.
-	 * So set the sipa_eth net_device's type to ARPHRD_RAWIP here.
-	 */
-	netdev->type = ARPHRD_RAWIP;
-
-	sipa_eth = netdev_priv(netdev);
-	sipa_eth_dt_stats_init(&sipa_eth->dt_stats);
-	sipa_eth->netdev = netdev;
-	sipa_eth->pdata = pdata;
-	netdev->netdev_ops = &sipa_eth_ops;
-	netdev->watchdog_timeo = 1 * HZ;
-	netdev->irq = 0;
-	netdev->dma = 0;
-
-	eth_hw_addr_random(netdev);
-
-	netif_napi_add_weight(netdev, &sipa_eth->napi, sipa_eth_rx_poll_handler,
-			      SIPA_ETH_NAPI_WEIGHT);
-
-	/* Register new Ethernet interface */
-	ret = register_netdev(netdev);
-	if (ret) {
-		pr_err("register_netdev() failed (%d)\n", ret);
-		netif_napi_del(&sipa_eth->napi);
-		free_netdev(netdev);
+	/* Each CP netid has one receive queue; WWAN does not reject duplicates. */
+	if (ctrl->wwan_links & BIT(link_id))
+		return -EBUSY;
+	sipa_eth->netid = link_id;
+	ret = register_netdevice(dev);
+	if (ret)
 		return ret;
-	}
-
-	sipa_eth->state = DEV_OFF;
-	/* Set link as disconnected */
-	netif_carrier_off(netdev);
-	platform_set_drvdata(pdev, sipa_eth);
-	sipa_eth_debugfs_mknod(root, (void *)sipa_eth);
+	ctrl->wwan_links |= BIT(link_id);
+	sipa_eth_debugfs_mknod(root, sipa_eth);
 	return 0;
 }
 
-/* Cleanup Ethernet device driver. */
-static void sipa_eth_remove(struct platform_device *pdev)
+static void sipa_wwan_dellink(void *ctxt, struct net_device *dev,
+			    struct list_head *head)
 {
-	struct SIPA_ETH *sipa_eth = platform_get_drvdata(pdev);
+	struct sipa_control *ctrl = ctxt;
+	struct SIPA_ETH *sipa_eth = wwan_netdev_drvpriv(dev);
 
 	debugfs_remove_recursive(sipa_eth->debugfs_dir);
-	unregister_netdev(sipa_eth->netdev);
-	netif_napi_del(&sipa_eth->napi);
-	free_netdev(sipa_eth->netdev);
-	platform_set_drvdata(pdev, NULL);
+	ctrl->wwan_links &= ~BIT(sipa_eth->netid);
+	unregister_netdevice_queue(dev, head);
 }
 
-static const struct of_device_id sipa_eth_match_table[] = {
-	{ .compatible = "sprd,sipa_eth" },
-	{}
-};
-
-static struct platform_driver sipa_eth_driver = {
-	.probe = sipa_eth_probe,
-	.remove = sipa_eth_remove,
-	.driver = { .owner = THIS_MODULE,
-		    .name = SIPA_ETH_IFACE_PREF,
-		    .of_match_table = sipa_eth_match_table }
+static const struct wwan_ops sipa_wwan_ops = {
+	.priv_size = sizeof(struct SIPA_ETH),
+	.setup = sipa_wwan_setup,
+	.newlink = sipa_wwan_newlink,
+	.dellink = sipa_wwan_dellink,
 };
 
 static int sipa_eth_debug_show(struct seq_file *m, void *v)
 {
 	struct SIPA_ETH *sipa_eth = (struct SIPA_ETH *)(m->private);
 	struct sipa_eth_dtrans_stats *stats;
-	struct sipa_eth_init_data *pdata;
 
 	if (!sipa_eth) {
 		pr_err("invalid data, sipa_eth is NULL\n");
 		return -EINVAL;
 	}
-	pdata = sipa_eth->pdata;
 	stats = &sipa_eth->dt_stats;
 
 	seq_puts(m, "*************************************************\n");
 	seq_printf(m, "DEVICE: %s, term_type %d, netid %d, state %s mac_h %d\n",
-		   pdata->name, pdata->term_type, pdata->netid,
-		   sipa_eth->state == DEV_ON ? "UP" : "DOWN", pdata->mac_h);
+		   sipa_eth->netdev->name, sipa_eth->term_type, sipa_eth->netid,
+		   sipa_eth->state == DEV_ON ? "UP" : "DOWN", sipa_eth->mac_h);
 	seq_puts(m, "\nRX statistics:\n");
 	seq_printf(m, "rx_sum=%u, rx_cnt=%u\n", stats->rx_sum, stats->rx_cnt);
 	seq_printf(m, "rx_fail=%u\n", stats->rx_fail);
@@ -643,7 +541,7 @@ static int sipa_eth_debugfs_mknod(void *root, void *data)
 	return 0;
 }
 
-static void __init sipa_eth_debugfs_init(void)
+static void sipa_eth_debugfs_init(void)
 {
 	root = debugfs_create_dir(SIPA_ETH_IFACE_PREF, NULL);
 	if (IS_ERR(root))
@@ -653,26 +551,23 @@ static void __init sipa_eth_debugfs_init(void)
 			    &fops_gro_enable);
 }
 
-static int __init sipa_eth_init(void)
+int sipa_eth_init(struct device *dev, struct sipa_control *ctrl)
 {
 	int ret;
 
 	sipa_eth_debugfs_init();
-	ret = platform_driver_register(&sipa_eth_driver);
+	ret = wwan_register_ops(dev, &sipa_wwan_ops, ctrl, 0);
 	if (ret)
 		debugfs_remove_recursive(root);
 	return ret;
 }
 
-static void __exit sipa_eth_exit(void)
+void sipa_eth_exit(struct device *dev)
 {
-	platform_driver_unregister(&sipa_eth_driver);
+	wwan_unregister_ops(dev);
 	debugfs_remove_recursive(root);
 }
 
-module_init(sipa_eth_init);
-module_exit(sipa_eth_exit);
-
 MODULE_AUTHOR("Wade.Shu");
-MODULE_DESCRIPTION("Unisoc Ethernet device driver for IPA");
+MODULE_DESCRIPTION("Unisoc SIPA WWAN data links");
 MODULE_LICENSE("GPL");

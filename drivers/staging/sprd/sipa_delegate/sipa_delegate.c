@@ -81,10 +81,38 @@ static int sipa_dele_parse_dts_cfg(struct platform_device *pdev,
 	return 0;
 }
 
+/* Binding the SIPA supplier establishes resource-manager availability;
+ * it does not register this delegate's producer or grant a remote request.
+ */
+static int sipa_dele_supplier_ready(struct device *dev)
+{
+	struct device_node *node;
+	struct platform_device *supplier;
+	int ret = 0;
+
+	node = of_parse_phandle(dev->of_node, "sprd,sipa", 0);
+	if (!node)
+		return -EINVAL;
+	if (!of_device_is_available(node)) {
+		of_node_put(node);
+		return -ENODEV;
+	}
+	supplier = of_find_device_by_node(node);
+	of_node_put(node);
+	if (!supplier)
+		return -EPROBE_DEFER;
+	if (!device_is_bound(&supplier->dev) || !platform_get_drvdata(supplier))
+		ret = -EPROBE_DEFER;
+	else if (!device_link_add(dev, &supplier->dev,
+				 DL_FLAG_AUTOREMOVE_CONSUMER))
+		ret = -ENOMEM;
+	put_device(&supplier->dev);
+	return ret;
+}
+
 /* The mailbox supplier may itself defer while its controller is probing.
  * CP firmware does not have to be running: after this dependency is ready,
  * the existing smsg_ch_open(..., -1) waits for the remote OPEN handshake.
- * Opt in per board; legacy device trees keep their existing dependencies.
  */
 static int sipa_dele_cp_transport_ready(struct device *dev)
 {
@@ -93,8 +121,7 @@ static int sipa_dele_cp_transport_ready(struct device *dev)
 	u32 dst;
 	int ret = 0;
 
-	if (!IS_ENABLED(CONFIG_SPRD_SIPA_DELE_CP_IN_MINIAP) ||
-	    !of_find_property(dev->of_node, "sprd,cp-transport", NULL))
+	if (!IS_ENABLED(CONFIG_SPRD_SIPA_DELE_CP_IN_MINIAP))
 		return 0;
 	node = of_parse_phandle(dev->of_node, "sprd,cp-transport", 0);
 	if (!node)
@@ -126,8 +153,9 @@ static int sipa_dele_plat_drv_probe(struct platform_device *pdev_p)
 	struct sipa_delegate_plat_drv_cfg *cfg = &s_sipa_dele_cfg;
 	struct sipa_delegator_create_params create_params;
 
-	if (!sipa_rm_is_initialized())
-		return -EPROBE_DEFER;
+	ret = sipa_dele_supplier_ready(dev);
+	if (ret)
+		return dev_err_probe(dev, ret, "SIPA supplier is not ready\n");
 	ret = sipa_dele_cp_transport_ready(dev);
 	if (ret)
 		return dev_err_probe(dev, ret,
@@ -145,34 +173,6 @@ static int sipa_dele_plat_drv_probe(struct platform_device *pdev_p)
 	create_params.cfg = cfg;
 	create_params.chan = SMSG_CH_COMM_SIPA;
 
-#ifdef CONFIG_SPRD_SIPA_DELE_MINIAP_IN_AP
-	create_params.prod_id = SIPA_RM_RES_PROD_MINI_AP;
-	create_params.cons_prod = SIPA_RM_RES_CONS_WWAN_UL;
-	create_params.cons_user = SIPA_RM_RES_CONS_WWAN_DL;
-	create_params.dst = SIPC_ID_MINIAP;
-
-	ret = miniap_delegator_init(&create_params);
-	if (ret) {
-		dev_err(dev, "miniap_delegator_init failed: %d\n", ret);
-		return ret;
-	}
-	pr_debug("miniap_delegator_init!\n");
-#endif /* CONFIG_SPRD_SIPA_DELE_MINIAP_IN_AP */
-
-#ifdef CONFIG_SPRD_SIPA_DELE_AP_IN_MINIAP
-	create_params.prod_id = SIPA_RM_RES_PROD_AP;
-	create_params.cons_prod = SIPA_RM_RES_CONS_WWAN_DL;
-	create_params.cons_user = SIPA_RM_RES_CONS_WWAN_UL;
-	create_params.dst = SIPC_ID_AP;
-
-	ret = ap_delegator_init(&create_params);
-	if (ret) {
-		dev_err(dev, "ap_delegator_init failed: %d\n", ret);
-		return ret;
-	}
-	pr_debug("ap_delegator_init!\n");
-#endif /* CONFIG_SPRD_SIPA_DELE_AP_IN_MINIAP */
-
 #ifdef CONFIG_SPRD_SIPA_DELE_CP_IN_MINIAP
 	create_params.prod_id = SIPA_RM_RES_PROD_CP;
 	create_params.cons_prod = SIPA_RM_RES_CONS_WWAN_UL;
@@ -185,7 +185,7 @@ static int sipa_dele_plat_drv_probe(struct platform_device *pdev_p)
 		return ret;
 	}
 	pr_debug("cp_delegator_init!\n");
-#endif /* CONFIG_SPRD_SIPA_DELE_AP_IN_MINIAP */
+#endif /* CONFIG_SPRD_SIPA_DELE_CP_IN_MINIAP */
 
 	return ret;
 }

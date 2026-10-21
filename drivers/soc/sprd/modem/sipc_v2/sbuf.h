@@ -16,6 +16,9 @@
 #define __SBUF_H
 
 #include <linux/workqueue.h>
+#include <linux/kref.h>
+#include <linux/notifier.h>
+#include <linux/poll.h>
 
 /* flag for CMD/DONE msg type */
 #define SMSG_CMD_SBUF_INIT 0x0001
@@ -112,7 +115,12 @@ struct sbuf_ring {
 struct sbuf_uart_notifier;
 struct sbuf_uart_backend;
 
+/* Notifier callbacks only enqueue work; they must not wait for ring I/O. */
+#define SBUF_NOTIFY_RESET 0x100
+
 struct sbuf_mgr {
+	struct kref ref;
+	struct blocking_notifier_head events;
 	u8 dst;
 	u8 channel;
 	u32 state;
@@ -139,4 +147,19 @@ struct sbuf_mgr {
 	struct sbuf_ring *rings;
 	struct task_struct *thread;
 };
+/* The successful channel creator owns lookup and serializes it with destroy.
+ * Endpoints retain this manager, never look up a possibly newer tuple on I/O.
+ */
+struct sbuf_mgr *sbuf_get_manager(u8 dst, u8 channel);
+void sbuf_put_manager(struct sbuf_mgr *sbuf);
+int sbuf_session_state(struct sbuf_mgr *sbuf, u32 *generation);
+void sbuf_session_cancel(struct sbuf_mgr *sbuf, u32 ring, bool *dead);
+int sbuf_session_read(struct sbuf_mgr *sbuf, u32 generation, const bool *dead,
+		      u32 ring, void *buf, u32 len, int timeout, bool user);
+int sbuf_session_write(struct sbuf_mgr *sbuf, u32 generation, const bool *dead,
+		       u32 ring, const void *buf, u32 len, int timeout,
+		       bool user);
+__poll_t sbuf_session_poll(struct sbuf_mgr *sbuf, u32 generation,
+			   const bool *dead, u32 ring, struct file *file,
+			   poll_table *wait);
 #endif

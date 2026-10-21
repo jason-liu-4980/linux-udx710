@@ -113,6 +113,7 @@ struct sipa_hw_data {
 	const u32 ahb_regnum;
 	const struct ipa_register_map *ahb_reg;
 	const bool standalone_subsys;
+	const int local_usb_prod;
 };
 
 struct sipa_plat_drv_cfg {
@@ -146,7 +147,7 @@ struct sipa_plat_drv_cfg {
 	bool tft_mode;
 	bool wiap_ul_dma;
 	bool need_through_pcie;
-	/* Validated DT transport, not a producer readiness/grant flag. */
+	/* Platform resource type, not a producer readiness/grant flag. */
 	enum sipa_usb_format
 		usb_format; /* resume_lock; restored before USB FIFO */
 	int usb_remote_prod;
@@ -351,6 +352,8 @@ struct sipa_control {
 
 	/* IPA NIC interface */
 	struct sipa_nic *nic[SIPA_NIC_MAX];
+	/* CP netids allocated through WWAN; protected by RTNL. */
+	unsigned long wwan_links;
 
 	/* sender & receiver */
 	struct sipa_skb_sender *sender[SIPA_PKT_TYPE_MAX];
@@ -376,6 +379,8 @@ void destroy_sipa_skb_sender(struct sipa_skb_sender *sender);
 u32 sipa_get_suspend_status(void);
 
 struct sipa_control *sipa_get_ctrl_pointer(void);
+int sipa_eth_init(struct device *dev, struct sipa_control *ctrl);
+void sipa_eth_exit(struct device *dev);
 
 int sipa_skb_sender_send_data(struct sipa_skb_sender *sender,
 			      struct sk_buff *skb, enum sipa_term_type dst,

@@ -24,88 +24,65 @@
 
 #include "sipc_priv.h"
 #include "spipe.h"
+#include "sbuf.h"
+
+struct spipe_endpoint {
+	struct device dev;
+	struct cdev cdev;
+	struct sbuf_mgr *sbuf;
+	u32 generation;
+	u32 ring;
+	bool dead;
+};
 
 struct spipe_device {
 	struct spipe_init_data *init;
-	int major;
-	int minor;
-	struct cdev cdev;
-};
-
-struct spipe_sbuf {
-	u8 dst;
-	u8 channel;
-	u32 bufid;
+	struct device *parent;
+	struct sbuf_mgr *sbuf;
+	struct notifier_block notifier;
+	struct work_struct work;
+	struct spipe_endpoint **endpoints;
+	dev_t devid;
+	u32 generation;
+	bool attempted;
 };
 
 static struct class *spipe_class;
 
-static ssize_t session_show(struct device *dev, struct device_attribute *attr,
-			    char *buf)
-{
-	struct spipe_device *spipe = dev_get_drvdata(dev);
-	u32 generation, state;
-	int ret;
-
-	ret = sbuf_get_session(spipe->init->dst, spipe->init->channel,
-			       &generation, &state);
-	if (ret)
-		return ret;
-	return sysfs_emit(buf, "1 %u %u %u %u\n", spipe->init->dst,
-			  spipe->init->channel, generation, state);
-}
-static DEVICE_ATTR_RO(session);
-
-static struct attribute *spipe_session_attrs[] = {
-	&dev_attr_session.attr,
-	NULL,
-};
-ATTRIBUTE_GROUPS(spipe_session);
-
 static int spipe_open(struct inode *inode, struct file *filp)
 {
-	int minor = iminor(filp->f_path.dentry->d_inode);
-	struct spipe_device *spipe;
-	struct spipe_sbuf *sbuf;
-	int ret;
+	struct spipe_endpoint *ep =
+		container_of(inode->i_cdev, struct spipe_endpoint, cdev);
+	u32 generation;
+	int ret = sbuf_session_state(ep->sbuf, &generation);
 
-	spipe = container_of(inode->i_cdev, struct spipe_device, cdev);
-	ret = sbuf_status(spipe->init->dst, spipe->init->channel);
 	if (ret)
 		return ret;
-
-	sbuf = kmalloc_obj(struct spipe_sbuf, GFP_KERNEL);
-	if (!sbuf)
-		return -ENOMEM;
-	filp->private_data = sbuf;
-
-	sbuf->dst = spipe->init->dst;
-	sbuf->channel = spipe->init->channel;
-	sbuf->bufid = minor - spipe->minor;
-
+	if (READ_ONCE(ep->dead) || generation != ep->generation)
+		return -EPIPE;
+	get_device(&ep->dev);
+	filp->private_data = ep;
 	return stream_open(inode, filp);
 }
 
 static int spipe_release(struct inode *inode, struct file *filp)
 {
-	struct spipe_sbuf *sbuf = filp->private_data;
+	struct spipe_endpoint *ep = filp->private_data;
 
-	kfree(sbuf);
-
+	put_device(&ep->dev);
 	return 0;
 }
 
 static ssize_t spipe_read(struct file *filp, char __user *buf, size_t count,
 			  loff_t *ppos)
 {
-	struct spipe_sbuf *sbuf = filp->private_data;
-	int ret, timeout = -1;
+	struct spipe_endpoint *ep = filp->private_data;
+	int ret, timeout = filp->f_flags & O_NONBLOCK ? 0 : -1;
 
-	if (filp->f_flags & O_NONBLOCK)
-		timeout = 0;
-
-	ret = sbuf_read_user(sbuf->dst, sbuf->channel, sbuf->bufid, buf,
-			     min_t(size_t, count, MAX_RW_COUNT), timeout);
+	ret = sbuf_session_read(ep->sbuf, ep->generation, &ep->dead, ep->ring,
+				(void __force *)buf,
+				min_t(size_t, count, MAX_RW_COUNT), timeout,
+				true);
 	if (!timeout && (ret == -ENODATA || ret == -EBUSY))
 		return -EAGAIN;
 	return ret;
@@ -114,14 +91,13 @@ static ssize_t spipe_read(struct file *filp, char __user *buf, size_t count,
 static ssize_t spipe_write(struct file *filp, const char __user *buf,
 			   size_t count, loff_t *ppos)
 {
-	struct spipe_sbuf *sbuf = filp->private_data;
-	int ret, timeout = -1;
+	struct spipe_endpoint *ep = filp->private_data;
+	int ret, timeout = filp->f_flags & O_NONBLOCK ? 0 : -1;
 
-	if (filp->f_flags & O_NONBLOCK)
-		timeout = 0;
-
-	ret = sbuf_write_user(sbuf->dst, sbuf->channel, sbuf->bufid, buf,
-			      min_t(size_t, count, MAX_RW_COUNT), timeout);
+	ret = sbuf_session_write(ep->sbuf, ep->generation, &ep->dead, ep->ring,
+				 (const void __force *)buf,
+				 min_t(size_t, count, MAX_RW_COUNT), timeout,
+				 true);
 	if (!timeout && (ret == -ENODATA || ret == -EBUSY))
 		return -EAGAIN;
 	return ret;
@@ -129,15 +105,10 @@ static ssize_t spipe_write(struct file *filp, const char __user *buf,
 
 static __poll_t spipe_poll(struct file *filp, poll_table *wait)
 {
-	struct spipe_sbuf *sbuf = filp->private_data;
+	struct spipe_endpoint *ep = filp->private_data;
 
-	return sbuf_poll_wait(sbuf->dst, sbuf->channel, sbuf->bufid, filp,
-			      wait);
-}
-
-static long spipe_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
-{
-	return -ENOTTY;
+	return sbuf_session_poll(ep->sbuf, ep->generation, &ep->dead, ep->ring,
+				 filp, wait);
 }
 
 static const struct file_operations spipe_fops = {
@@ -146,9 +117,111 @@ static const struct file_operations spipe_fops = {
 	.read = spipe_read,
 	.write = spipe_write,
 	.poll = spipe_poll,
-	.unlocked_ioctl = spipe_ioctl,
 	.owner = THIS_MODULE,
 };
+
+static void spipe_endpoint_release(struct device *dev)
+{
+	struct spipe_endpoint *ep =
+		container_of(dev, struct spipe_endpoint, dev);
+
+	sbuf_put_manager(ep->sbuf);
+	kfree(ep);
+}
+
+static void spipe_unregister_endpoints(struct spipe_device *spipe)
+{
+	u32 i;
+
+	for (i = 0; i < spipe->init->ringnr; i++) {
+		struct spipe_endpoint *ep = spipe->endpoints[i];
+
+		if (!ep)
+			continue;
+		sbuf_session_cancel(ep->sbuf, ep->ring, &ep->dead);
+		cdev_device_del(&ep->cdev, &ep->dev);
+		put_device(&ep->dev);
+		spipe->endpoints[i] = NULL;
+	}
+}
+
+static int spipe_register_endpoint(struct spipe_device *spipe, u32 ring)
+{
+	struct spipe_endpoint *ep;
+	int ret;
+
+	ep = kzalloc(sizeof(*ep), GFP_KERNEL);
+	if (!ep)
+		return -ENOMEM;
+	ep->sbuf = spipe->sbuf;
+	kref_get(&ep->sbuf->ref);
+	ep->generation = spipe->generation;
+	ep->ring = ring;
+	device_initialize(&ep->dev);
+	ep->dev.release = spipe_endpoint_release;
+	ep->dev.class = spipe_class;
+	ep->dev.parent = spipe->parent;
+	ep->dev.devt = spipe->devid + ring;
+	if (spipe->init->ringnr > 1)
+		ret = dev_set_name(&ep->dev, "%s%u", spipe->init->name, ring);
+	else
+		ret = dev_set_name(&ep->dev, "%s", spipe->init->name);
+	if (ret)
+		goto put;
+	cdev_init(&ep->cdev, &spipe_fops);
+	ep->cdev.owner = THIS_MODULE;
+	ret = cdev_device_add(&ep->cdev, &ep->dev);
+	if (ret)
+		goto put;
+	spipe->endpoints[ring] = ep;
+	return 0;
+put:
+	sbuf_session_cancel(ep->sbuf, ep->ring, &ep->dead);
+	put_device(&ep->dev);
+	return ret;
+}
+
+static void spipe_session_work(struct work_struct *work)
+{
+	struct spipe_device *spipe =
+		container_of(work, struct spipe_device, work);
+	u32 generation, i;
+	int ret = sbuf_session_state(spipe->sbuf, &generation);
+
+	/* The existing generation also catches RESET/READY coalesced by work. */
+	if (ret || generation != spipe->generation) {
+		spipe_unregister_endpoints(spipe);
+		spipe->attempted = false;
+	}
+	if (ret || spipe->attempted)
+		return;
+	spipe->generation = generation;
+	spipe->attempted = true;
+	for (i = 0; i < spipe->init->ringnr; i++) {
+		/* Preserve all 15 firmware rings, export only actual consumers. */
+		if (spipe->init->dst == 5 && spipe->init->channel == 4 &&
+		    i != 2 && i != 3 && i != 8)
+			continue;
+		ret = spipe_register_endpoint(spipe, i);
+		if (ret) {
+			dev_err(spipe->parent,
+				"session port registration: %d\n", ret);
+			spipe_unregister_endpoints(spipe);
+			break;
+		}
+	}
+}
+
+static int spipe_event(struct notifier_block *nb, unsigned long event,
+		       void *data)
+{
+	struct spipe_device *spipe =
+		container_of(nb, struct spipe_device, notifier);
+
+	if (event == SBUF_NOTIFY_READY || event == SBUF_NOTIFY_RESET)
+		schedule_work(&spipe->work);
+	return NOTIFY_OK;
+}
 
 static int spipe_parse_dt(struct spipe_init_data **init, struct device_node *np,
 			  struct device *dev)
@@ -207,110 +280,68 @@ error:
 	return ret;
 }
 
-static inline void spipe_destroy_pdata(struct spipe_init_data **init,
-				       struct device *dev)
-{
-	struct spipe_init_data *pdata = *init;
-
-	devm_kfree(dev, pdata);
-
-	*init = NULL;
-}
-
 static int spipe_probe(struct platform_device *pdev)
 {
 	struct spipe_init_data *init;
 	struct spipe_device *spipe;
-	struct device *dev;
-	dev_t devid;
-	int i, ret;
+	int ret;
 
 	if (!pdev->dev.of_node)
 		return -ENODEV;
 	ret = spipe_parse_dt(&init, pdev->dev.of_node, &pdev->dev);
 	if (ret)
 		return ret;
-	if (!init->ringnr || init->ringnr > MINORMASK + 1U) {
-		ret = -EINVAL;
-		goto free_pdata;
-	}
-
+	if (!init->ringnr || init->ringnr > MINORMASK + 1U)
+		return -EINVAL;
 	spipe = devm_kzalloc(&pdev->dev, sizeof(*spipe), GFP_KERNEL);
-	if (!spipe) {
-		ret = -ENOMEM;
-		goto free_pdata;
-	}
+	if (!spipe)
+		return -ENOMEM;
+	spipe->endpoints = devm_kcalloc(&pdev->dev, init->ringnr,
+					sizeof(*spipe->endpoints), GFP_KERNEL);
+	if (!spipe->endpoints)
+		return -ENOMEM;
 	spipe->init = init;
+	spipe->parent = &pdev->dev;
+	INIT_WORK(&spipe->work, spipe_session_work);
+	spipe->notifier.notifier_call = spipe_event;
 	ret = sbuf_create(init->dst, init->channel, init->ringnr,
 			  init->txbuf_size, init->rxbuf_size);
 	if (ret)
-		goto free_pdata;
-	ret = alloc_chrdev_region(&devid, 0, init->ringnr, init->name);
+		return ret;
+	spipe->sbuf = sbuf_get_manager(init->dst, init->channel);
+	ret = alloc_chrdev_region(&spipe->devid, 0, init->ringnr, init->name);
 	if (ret)
-		goto destroy_sbuf;
-	spipe->major = MAJOR(devid);
-	spipe->minor = MINOR(devid);
-
-	for (i = 0; i < init->ringnr; i++) {
-		if (init->ringnr > 1)
-			dev = device_create_with_groups(spipe_class, &pdev->dev,
-							devid + i, spipe,
-							spipe_session_groups,
-							"%s%d", init->name, i);
-		else
-			dev = device_create_with_groups(spipe_class, &pdev->dev,
-							devid, spipe,
-							spipe_session_groups,
-							"%s", init->name);
-		if (IS_ERR(dev)) {
-			ret = PTR_ERR(dev);
-			goto destroy_devices;
-		}
-	}
-
-	/* Initialize all open-time data before the cdev becomes visible. */
-	cdev_init(&spipe->cdev, &spipe_fops);
-	spipe->cdev.owner = THIS_MODULE;
-	ret = cdev_add(&spipe->cdev, devid, init->ringnr);
+		goto destroy;
+	ret = blocking_notifier_chain_register(&spipe->sbuf->events,
+					       &spipe->notifier);
 	if (ret)
-		goto destroy_devices;
+		goto unregister;
 	platform_set_drvdata(pdev, spipe);
+	/* Covers READY before the notifier was attached. */
+	schedule_work(&spipe->work);
 	return 0;
-
-destroy_devices:
-	while (i--)
-		device_destroy(spipe_class, devid + i);
-	unregister_chrdev_region(devid, init->ringnr);
-destroy_sbuf:
+unregister:
+	unregister_chrdev_region(spipe->devid, init->ringnr);
+destroy:
 	sbuf_destroy(init->dst, init->channel);
-free_pdata:
-	spipe_destroy_pdata(&init, &pdev->dev);
+	sbuf_put_manager(spipe->sbuf);
 	return ret;
 }
 
 static void spipe_remove(struct platform_device *pdev)
 {
 	struct spipe_device *spipe = platform_get_drvdata(pdev);
-	int i;
 
-	if (spipe) {
-		for (i = 0; i < spipe->init->ringnr; i++) {
-			device_destroy(spipe_class,
-				       MKDEV(spipe->major, spipe->minor + i));
-		}
-		cdev_del(&(spipe->cdev));
-		unregister_chrdev_region(MKDEV(spipe->major, spipe->minor),
-					 spipe->init->ringnr);
-
-		sbuf_destroy(spipe->init->dst, spipe->init->channel);
-
-		spipe_destroy_pdata(&spipe->init, &pdev->dev);
-
-		devm_kfree(&pdev->dev, spipe);
-
-		platform_set_drvdata(pdev, NULL);
-	}
-
+	blocking_notifier_chain_unregister(&spipe->sbuf->events,
+					   &spipe->notifier);
+	cancel_work_sync(&spipe->work);
+	/* Invalidate and join ring I/O before removing nodes. Old files keep only
+	 * their endpoint and the dead manager, never this devm controller.
+	 */
+	sbuf_destroy(spipe->init->dst, spipe->init->channel);
+	spipe_unregister_endpoints(spipe);
+	unregister_chrdev_region(spipe->devid, spipe->init->ringnr);
+	sbuf_put_manager(spipe->sbuf);
 }
 
 static const struct of_device_id spipe_match_table[] = {

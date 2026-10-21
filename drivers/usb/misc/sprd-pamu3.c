@@ -919,22 +919,6 @@ static int pamu3_pause_locked(struct sprd_pamu3 *pam)
 	return pamu3_rm_put(pam);
 }
 
-int sprd_pamu3_pause(struct device *dev)
-{
-	struct sprd_pamu3 *pam = dev_get_drvdata(dev);
-	int ret;
-
-	if (!pam)
-		return -ENODEV;
-	if (in_interrupt())
-		return -EWOULDBLOCK;
-	mutex_lock(&pam->lock);
-	ret = pamu3_pause_locked(pam);
-	mutex_unlock(&pam->lock);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(sprd_pamu3_pause);
-
 int sprd_pamu3_stop(struct device *dev)
 {
 	struct sprd_pamu3 *pam = dev_get_drvdata(dev);
@@ -962,7 +946,7 @@ static void pamu3_put_device(void *data)
 static int sprd_pamu3_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct platform_device *controller;
+	struct platform_device *controller, *sipa;
 	struct sprd_pamu3 *pam;
 	struct device_node *np;
 	struct resource *res;
@@ -1009,13 +993,23 @@ static int sprd_pamu3_probe(struct platform_device *pdev)
 		return ret;
 	if (!dev_get_drvdata(pam->controller))
 		return -EPROBE_DEFER;
-	pam->sipa = sipa_get_pdev();
-	if (!pam->sipa)
+	np = of_parse_phandle(dev->of_node, "sprd,sipa", 0);
+	if (!np)
+		return -EINVAL;
+	if (!of_device_is_available(np)) {
+		of_node_put(np);
+		return -ENODEV;
+	}
+	sipa = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!sipa)
 		return -EPROBE_DEFER;
-	get_device(pam->sipa);
+	pam->sipa = &sipa->dev;
 	ret = devm_add_action_or_reset(dev, pamu3_put_device, pam->sipa);
 	if (ret)
 		return ret;
+	if (!device_is_bound(pam->sipa) || !dev_get_drvdata(pam->sipa))
+		return -EPROBE_DEFER;
 	if (!device_link_add(dev, pam->controller,
 			     DL_FLAG_AUTOREMOVE_CONSUMER) ||
 	    !device_link_add(dev, pam->sipa, DL_FLAG_AUTOREMOVE_CONSUMER))

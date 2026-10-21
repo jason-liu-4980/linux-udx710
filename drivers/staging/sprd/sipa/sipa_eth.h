@@ -25,11 +25,6 @@ struct SIPA_ETH {
 	/* Record data_transfer statistics */
 	struct sipa_eth_dtrans_stats dt_stats;
 	struct net_device_stats stats; /* Net statistics */
-	struct sipa_eth_init_data *pdata; /* Platform data */
-};
-
-struct sipa_eth_init_data {
-	char name[IFNAMSIZ];
 	u32 term_type;
 	s32 netid;
 	bool mac_h;
