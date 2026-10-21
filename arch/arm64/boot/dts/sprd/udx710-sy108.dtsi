@@ -1,76 +1,870 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "udx710.dtsi"
-#include "udx710-sy108-pmic.dtsi"
-#include "udx710-sy108-thermal.dtsi"
-/ { model = "SY108 UDX710 CPE"; compatible = "sprd,sy108", "sprd,udx710"; };
+#include "udx710-sy108-pinctrl.dtsi"
+/* SY108 wiring, external clocks and CPU supply policy.  */
+/ {
+	aliases {
+		watchdog0 = &apcpu_wdt;
+		watchdog1 = &pmic_wdt;
+		serial0 = "/soc/ap-apb-bus/serial@24100000";
+	};
+	chosen {
+		stdout-path = "/soc/ap-apb-bus/serial@24100000:115200n8";
+	};
+	ext_26m: ext-26m {
+		compatible = "fixed-clock";
+		#clock-cells = <0x0>;
+		clock-frequency = <0x18cba80>;
+		clock-output-names = "ext-26m";
+	};
+	ext_32k: ext_32k {
+		compatible = "fixed-clock";
+		#clock-cells = <0x0>;
+		clock-frequency = <0x8000>;
+		clock-output-names = "ext-32k";
+	};
+	extcon_usb0: extcon_usb0 {
+		compatible = "linux,extcon-usb-gpio";
+		vbus-gpios = <&sc2730_eic 0x0 0x0>;
+	};
+	gpio-ctrl {
+		compatible = "sprd,gpio-ctrl";
+		rst_mcu = <&{/soc/aon-bus/gpio@632d0000} 0x46 0x0>;
+		wkup_mcu = <&{/soc/aon-bus/gpio@632d0000} 0x47 0x0>;
+		status = "disabled";
+	};
+	board_temp {
+		compatible = "sprd,board_temp_adc";
+		io-channels = <&sc2730_adc 0x2 &sc2730_adc 0x4 &sc2730_adc 0x6>;
+		io-channel-names = "temp_cp", "temp_234g", "temp_nr";
+		status = "disabled";
+	};
+	cpufreq_clus0: cpufreq-clus0 {
+		voltage-step = <0xb71b0>;
+		boost-duration = <0x0>;
+		tuning-latency-us = <0xc8>;
+	};
+};
+
+&{/soc/ap-ahb-bus/nand-controller@21300000} {
+	status = "okay";
+};
+&{/soc/ap-apb-bus/serial@24100000} {
+	status = "okay";
+};
+&{/soc/ipa-bus/usb3@29100000} {
+	status = "okay";
+};
+&{/soc/ipa-bus/ssphy@634e0000} {
+	status = "okay";
+};
+&{/soc/ipa-bus/ssphy0@634d0000} {
+	sprd,vdd-voltage = <0x325aa0>;
+	vdd-supply = <&vddusb33>;
+};
+
+&{/soc/ipa-bus/ssphy@634e0000} {
+	sprd,vdd-voltage = <0x325aa0>;
+	vdd-supply = <&vddusb33>;
+};
+
+&usb1_dwc3 {
+	dr_mode = "peripheral";
+};
+
+#include "udx710-sy108-firmware.dtsi"
+/* Retained firmware diagnostics and data interfaces. */
+/ {
+	audio-sipc {
+		compatible = "sprd,audio_sipc";
+		sprd,mailbox-core = <0x5>;
+		status = "disabled";
+	};
+	audio-dsp-dump@0 {
+		compatible = "sprd,audio_dsp_log";
+		sprd-usemem-type = <0x5>;
+		sprd-dst = [01];
+		sprd-channel = [04];
+		sprd-rxblocknum = <0x8>;
+		sprd-rxblocksize = <0x2000>;
+		status = "disabled";
+	};
+	audio-dsp-dump@1 {
+		compatible = "sprd,audio_dsp_pcm";
+		sprd-usemem-type = <0x5>;
+		sprd-dst = [01];
+		sprd-channel = [03];
+		sprd-rxblocknum = <0x8>;
+		sprd-rxblocksize = <0x2000>;
+		status = "disabled";
+	};
+	audio-dsp-dump@2 {
+		compatible = "sprd,audio_dsp_mem";
+		sprd-usemem-type = <0x9>;
+		sprd-usemem-bytes = <0x80000>;
+		sprd-dst = [01];
+		sprd-channel = [05];
+		sprd,dspdumpmem = <0x56000000 0x10000 0x7400 0x1000 0x87100000 0x5f000>;
+		status = "disabled";
+	};
+	ion {
+		compatible = "sprd,ion";
+		#address-cells = <0x1>;
+		#size-cells = <0x0>;
+		status = "disabled";
+		heap@0 {
+			reg = <0x0>;
+			label = "system";
+			type = <0x0>;
+		};
+	};
+	autotest {
+		compatible = "sprd,autotest";
+		sprd,pinctrl = <0xfd>;
+		status = "disabled";
+	};
+	sprd-verify {
+		compatible = "sprd,orca-verify";
+		nvmem-names = "ap-efuse";
+		nvmem = <&{/soc/aon-bus/efuse@63400000}>;
+		status = "disabled";
+	};
+	sbridge@0 {
+		compatible = "sprd,slog_bridge";
+		sprd,tx_is_usb = <0x1>;
+		sprd,tx_dst = <0x0>;
+		sprd,rx_dst = <0x1 0x2 0x5 0x7 0x8>;
+		sprd,priority = <0x56>;
+		status = "disabled";
+	};
+	crypto {
+		compatible = "sprd,crypto_modem_verify";
+		status = "disabled";
+	};
+	time_sync {
+		compatible = "sprd,time-sync";
+		status = "disabled";
+	};
+	cooling-devices {
+		cluster0_cooling: cluster0-cooling {
+			compatible = "sprd,cluster-cooling";
+			#cooling-cells = <0x2>;
+			sprd,efuse-block7 = <0x7>;
+			sprd,efuse-block15 = <0xf>;
+			sprd,leak-core = <0x2 0x55 0x74d>;
+			sprd,leak-cluster = <0x2 0x55 0x9dc>;
+			sprd,core-temp-scale = <0x1f 0xfffff41f 0x29810 0xffe7bd10>;
+			sprd,core-voltage-scale = <0xcf8 0xffffe2bf 0x163c 0xfffffa71>;
+			sprd,cluster-temp-scale = <0x1f 0xfffff41f 0x29810 0xffe7bd10>;
+			sprd,cluster-voltage-scale = <0xcf8 0xffffe2bf 0x163c 0xfffffa71>;
+			sprd,efuse-switch = <0x0>;
+			sprd,hotplug-period = <0x0>;
+			sprd,min-cpufreq = <0xbb800>;
+			sprd,min-cpunum = <0x3>;
+			sprd,core-base = <0xf5a>;
+			sprd,cluster-base = <0x689>;
+			sprd,dynamic-core = <0x43c 0x3e8 0x3e8>;
+			sprd,dynamic-cluster = <0x2f5 0x3e8 0x3e8>;
+			sprd,sensor-names = "ank0-thmzone", "ank1-thmzone";
+			sprd,cii-per-core-tp = <0x186a0 0x17318>;
+			sprd,cii-max-tp-core = <0x15f90>;
+			status = "disabled";
+		};
+	};
+	sipa-usb0 {
+		compatible = "sprd,sipa_usb";
+		sprd,netid = <0x0>;
+		sprd,term-type = <0x1>;
+		status = "disabled";
+	};
+};
+
+&vbc {
+	pinctrl-names = "vbc_iis3_0", "vbc_iism0_0", "vbc_iis_to_pad", "vbc_iis_to_aon_usb", "vbc_iism0_1";
+	pinctrl-0 = <&pin_iis_matrix_cfg_inf0_a>;
+	pinctrl-1 = <&pin_iis_matrix_cfg_inf0_d>;
+	pinctrl-2 = <&pin_vbc_iis_inf_sys_0>;
+	pinctrl-3 = <&pin_vbc_iis_inf_sys_1>;
+	pinctrl-4 = <&pin_iis_matrix_cfg_inf1_d>;
+};
+
+&i2s0 {
+	sprd,config_type = "pcm";
+	sprd,slave_timeout = <0xf11>;
+	sprd,fs = <0x1f40>;
+	sprd,bus_type = <0x1>;
+	sprd,rtx_mode = <0x3>;
+	sprd,byte_per_chan = <0x1>;
+	sprd,slave_mode = <0x0>;
+	sprd,lsb = <0x0>;
+	sprd,lrck = <0x0>;
+	sprd,low_for_left = <0x1>;
+	sprd,clk_inv = <0x0>;
+	sprd,pcm_short_frame = <0x1>;
+	sprd,pcm_slot = <0x1>;
+	sprd,pcm_cycle = <0x1>;
+	sprd,tx_watermark = <0xc>;
+	sprd,rx_watermark = <0x14>;
+};
+
+&{/soc/ap-ahb-bus/sdio@26100000} {
+	sprd,hs400es-dly = <0xc0 0x7f 0x36 0x36>;
+	sprd,hs400-dly = <0xc0 0x7f 0x3d 0x3d>;
+	sprd,hs200-dly = <0x7f 0x82 0x85 0x85>;
+	sprd,ddr52-dly = <0x30 0x1a 0x18 0x18>;
+	vmmc-supply = <&vddemmccore>;
+	voltage-ranges = <0xbb8 0xbb8>;
+	bus-width = <0x8>;
+	non-removable;
+	cap-mmc-hw-reset;
+	mmc-hs400-enhanced-strobe;
+	mmc-hs400-1_8v;
+	mmc_hs200-1_8v;
+	mmc-ddr-1_8v;
+	sprd,name = "sdio_emmc";
+	sprd,sdio-adma;
+	no-sdio;
+	no-sd;
+};
+
+/* SY108 board: SC2730 placement, wiring, enabled functions and rail policy. */
+&udx710_adi {
+	status = "okay";
+	sprd,hw-channels = <0x2 0x18cc 0x3 0x18cc 0xd 0x1854 0xf 0x1874 0x11 0x1844 0x13 0x1844 0x1e 0x1820 0x1f 0x197c 0x20 0x197c 0x21 0x1988 0x23 0x19b8 0x27 0x19ac>;
+	sc2730: pmic@0 {
+		reg = <0x0>;
+		spi-max-frequency = <0x18cba80>;
+		interrupts = <0x0 0x82 0x4>;
+#include "sc2730.dtsi"
+	};
+};
+
+&sc2730 {
+	/* SY108 has no physical LEDs. */
+	led-controller@180 {
+		status = "disabled";
+	};
+	efuse@300 {
+		hwlocks = <&hwspinlock 0xc>;
+	};
+	typec@380 {
+		mode = <0x2>;
+		status = "disabled";
+	};
+	fchg@400 {
+		status = "disabled";
+	};
+	adc@504 {
+		hwlocks = <&hwspinlock 0x4>;
+	};
+	fgu@c00 {
+		bat-detect-gpio = <&sc2730_eic 0x3 0x0>;
+		io-channels = <&sc2730_adc 0x0 &sc2730_adc 0xe>;
+		io-channel-names = "bat-temp", "charge-vol";
+		status = "disabled";
+	};
+	pd@e00 {
+		extcon = <&sc2730_typec>;
+		status = "disabled";
+	};
+	audio-codec@1000 {
+		sprd,syscon-pmu-apb = <&pmu_apb>;
+		status = "disabled";
+	};
+	tsensor@1b34 {
+		status = "disabled";
+	};
+	led-controller@1b88 {
+		status = "disabled";
+	};
+	hw_reset@1bc0 {
+		status = "disabled";
+	};
+	regulators {
+		dcdc-cpu {
+			regulator-name = "vddcpu";
+			regulator-min-microvolt = <0x30d40>;
+			regulator-max-microvolt = <0x185dcb>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		dcdc-gpu {
+			regulator-name = "vddgpu";
+			regulator-min-microvolt = <0x30d40>;
+			regulator-max-microvolt = <0x185dcb>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		dcdc-core {
+			regulator-name = "vddcore";
+			regulator-min-microvolt = <0x30d40>;
+			regulator-max-microvolt = <0x185dcb>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		dcdc-modem {
+			regulator-name = "vddmodem";
+			regulator-min-microvolt = <0x30d40>;
+			regulator-max-microvolt = <0x185dcb>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		dcdc-mem {
+			regulator-name = "vddmem";
+			regulator-min-microvolt = <0x61a80>;
+			regulator-max-microvolt = <0x185196>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		dcdc-memq {
+			regulator-name = "vddmemq";
+			regulator-min-microvolt = <0x61a80>;
+			regulator-max-microvolt = <0x185dcb>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		dcdc-gen0 {
+			regulator-name = "vddgen0";
+			regulator-min-microvolt = <0x129da0>;
+			regulator-max-microvolt = <0x24c881>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		dcdc-gen1 {
+			regulator-name = "vddgen1";
+			regulator-min-microvolt = <0xcf850>;
+			regulator-max-microvolt = <0x1914e6>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		dcdc-sram {
+			regulator-name = "vddsram";
+			regulator-min-microvolt = <0x30d40>;
+			regulator-max-microvolt = <0x185dcb>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		ldo-avdd18 {
+			regulator-name = "avdd18";
+			regulator-min-microvolt = <0x11edd8>;
+			regulator-max-microvolt = <0x1b8ac8>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		ldo-vddrf18 {
+			regulator-name = "vddrf18";
+			regulator-min-microvolt = <0x11edd8>;
+			regulator-max-microvolt = <0x1b8ac8>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+			status = "okay";
+		};
+		ldo-vddcamio {
+			regulator-name = "vddcamio";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x1bec70>;
+			regulator-ramp-delay = <0x61a8>;
+		};
+		ldo-vddwcn {
+			regulator-name = "vddwcn";
+			regulator-min-microvolt = <0xdbba0>;
+			regulator-max-microvolt = <0x1c2708>;
+			regulator-ramp-delay = <0x61a8>;
+			status = "disabled";
+		};
+		ldo-vddcamd1 {
+			regulator-name = "vddcamd1";
+			regulator-min-microvolt = <0xdbba0>;
+			regulator-max-microvolt = <0x14d408>;
+			regulator-ramp-delay = <0x61a8>;
+			status = "disabled";
+		};
+		ldo-vddcamd0 {
+			regulator-name = "vddcamd0";
+			regulator-min-microvolt = <0xdbba0>;
+			regulator-max-microvolt = <0x14d408>;
+			regulator-ramp-delay = <0x61a8>;
+			status = "disabled";
+		};
+		ldo-vddrf1v25 {
+			regulator-name = "vddrf1v25";
+			regulator-min-microvolt = <0xdbba0>;
+			regulator-max-microvolt = <0x14d408>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+			status = "disabled";
+		};
+		ldo-avdd12 {
+			regulator-name = "avdd12";
+			regulator-min-microvolt = <0xdbba0>;
+			regulator-max-microvolt = <0x14d408>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		ldo-vddcama0 {
+			regulator-name = "vddcama0";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+		};
+		ldo-vddcama1 {
+			regulator-name = "vddcama1";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+		};
+		ldo-vddcammot {
+			regulator-name = "vddcammot";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+			/* Already enabled by board firmware. Its board consumer is not
+			 * described yet; retain this rail explicitly, not every rail. */
+			regulator-always-on;
+			status = "okay";
+		};
+		ldo-vddsim2 {
+			regulator-name = "vddsim2";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+		};
+		ldo-vddemmccore {
+			regulator-name = "vddemmccore";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+		};
+		ldo-vddsdcore {
+			regulator-name = "vddsdcore";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		ldo-vddsdio {
+			regulator-name = "vddsdio";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+		};
+		ldo-vdd28 {
+			regulator-name = "vdd28";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		ldo-vddwifipa {
+			regulator-name = "vddwifipa";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+		};
+		ldo-vdd18-dcxo {
+			regulator-name = "vdd18_dcxo";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+			regulator-always-on;
+		};
+		ldo-vddusb33 {
+			regulator-name = "vddusb33";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+		};
+		ldo-vddldo0 {
+			regulator-name = "vddldo0";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+			status = "disabled";
+		};
+		ldo-vddldo1 {
+			regulator-name = "vddldo1";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+		};
+		ldo-vddldo2 {
+			regulator-name = "vddldo2";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+			status = "disabled";
+		};
+		ldo-vddkpled {
+			regulator-name = "vddkpled";
+			regulator-min-microvolt = <0x124f80>;
+			regulator-max-microvolt = <0x393870>;
+			regulator-ramp-delay = <0x61a8>;
+		};
+	};
+};
+
+&pmic_wdt {
+	status = "okay";
+};
+/* SY108 NAND instance and existing storage policy. The controller resources
+ * stay in udx710.dtsi. Preserve the OEM partition node names, geometry and ECC.
+ */
+/* Orca selector 3: 195 MHz 2x, retaining the qualified 307.2 MHz ECC source. */
+&{/soc/ap-ahb-bus/nand-controller@21300000} {
+	status = "okay";
+	clocks = <&aon_clk 0x2e &ap_clk 0x2 &g3_pll 0x1 &g3_pll 0xe
+		  &ap_ahb_gate 0x1 &ap_ahb_gate 0x2 &ap_ahb_gate 0x3 &aon_apb_gate 0x69 &aon_apb_gate 0x6a>;
+
+	nand@0 {
+		reg = <0x0>;
+		nand-bus-width = <0x8>;
+		nand-ecc-mode = "hw";
+		nand-ecc-strength = <0x8>;
+		nand-ecc-step-size = <0x200>;
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <0x1>;
+			#size-cells = <0x1>;
+			partition@0 {
+				label = "splloader";
+				reg = <0x0 0x40000>;
+				read-only;
+			};
+			partition@40000 {
+				label = "uboot";
+				reg = <0x40000 0x140000>;
+				read-only;
+			};
+			partition@180000 {
+				label = "sml";
+				reg = <0x180000 0xc0000>;
+				read-only;
+			};
+			partition@240000 {
+				label = "trustos";
+				reg = <0x240000 0x20000>;
+				read-only;
+			};
+			partition@260000 {
+				label = "ubootbak";
+				reg = <0x260000 0x140000>;
+				read-only;
+			};
+			partition@3a0000 {
+				label = "smlbak";
+				reg = <0x3a0000 0xc0000>;
+				read-only;
+			};
+			partition@460000 {
+				label = "trustosbak";
+				reg = <0x460000 0x20000>;
+				read-only;
+			};
+			partition@480000 {
+				label = "ubipac";
+				reg = <0x480000 0xfb80000>;
+				read-only;
+			};
+		};
+	};
+};
+
+/* Linux owns all MTD partitions for in-system maintenance. */
+&{/soc/ap-ahb-bus/nand-controller@21300000/nand@0/partitions/partition@0} {
+	/delete-property/ read-only;
+};
+&{/soc/ap-ahb-bus/nand-controller@21300000/nand@0/partitions/partition@40000} {
+	/delete-property/ read-only;
+};
+&{/soc/ap-ahb-bus/nand-controller@21300000/nand@0/partitions/partition@180000} {
+	/delete-property/ read-only;
+};
+&{/soc/ap-ahb-bus/nand-controller@21300000/nand@0/partitions/partition@240000} {
+	/delete-property/ read-only;
+};
+&{/soc/ap-ahb-bus/nand-controller@21300000/nand@0/partitions/partition@260000} {
+	/delete-property/ read-only;
+};
+&{/soc/ap-ahb-bus/nand-controller@21300000/nand@0/partitions/partition@3a0000} {
+	/delete-property/ read-only;
+};
+&{/soc/ap-ahb-bus/nand-controller@21300000/nand@0/partitions/partition@460000} {
+	/delete-property/ read-only;
+};
+&{/soc/ap-ahb-bus/nand-controller@21300000/nand@0/partitions/partition@480000} {
+	/delete-property/ read-only;
+};
+
+/* SY108 sensor selection, NTC wiring/curves, aggregation and cooling policy. */
+&thm0 {
+	status = "okay";
+};
+&thm1 {
+	status = "okay";
+};
+&thm2 {
+	status = "okay";
+};
+&{/soc/aon-bus} {
+
+};
+
+/ {
+	thermal-zones {
+		soc-thermal {
+			polling-delay-passive = <0x64>;
+			polling-delay = <0x3e8>;
+			sustainable-power = <0x3e8>;
+			thermal-sensors = <&soc_sensor 0x11>;
+			status = "okay";
+			trips {
+				trip-point-0 {
+					temperature = <0x11170>;
+					hysteresis = <0x3e8>;
+					type = "passive";
+				};
+				soc_passive_trip: trip-point-1 {
+					temperature = <0x14c08>;
+					hysteresis = <0x3e8>;
+					type = "passive";
+				};
+				soc_crit {
+					temperature = <0x1adb0>;
+					hysteresis = <0x7d0>;
+					type = "critical";
+				};
+			};
+			cooling-maps {
+				map0 {
+					trip = <&soc_passive_trip>;
+					contribution = <0x400>;
+					cooling-device = <&cpu0 0xffffffff 0xffffffff>;
+				};
+			};
+		};
+		apcpu0-thermal {
+			polling-delay-passive = <0x0>;
+			polling-delay = <0x0>;
+			thermal-sensors = <&thm0 0x0>;
+		};
+		nrcp-thermal {
+			polling-delay-passive = <0x0>;
+			polling-delay = <0x0>;
+			thermal-sensors = <&thm1 0x0>;
+		};
+		apcpu1-thermal {
+			polling-delay-passive = <0x0>;
+			polling-delay = <0x0>;
+			thermal-sensors = <&thm2 0x0>;
+		};
+		ank0-thermal {
+			polling-delay-passive = <0x0>;
+			polling-delay = <0x0>;
+			thermal-sensors = <&thm2 0x1>;
+		};
+		ank1-thermal {
+			polling-delay-passive = <0x0>;
+			polling-delay = <0x0>;
+			thermal-sensors = <&thm2 0x2>;
+		};
+		cluster0-thermal {
+			polling-delay-passive = <0x0>;
+			polling-delay = <0x0>;
+			sustainable-power = <0x3e8>;
+			thermal-sensors = <&cluster0_sensor 0xf>;
+			status = "okay";
+		};
+		pa-thermal {
+			polling-delay-passive = <0x0>;
+			polling-delay = <0x0>;
+			thermal-sensors = <&pa_sensor>;
+			status = "okay";
+		};
+		pa5g-thermal {
+			polling-delay-passive = <0x0>;
+			polling-delay = <0x0>;
+			thermal-sensors = <&pa5g_sensor>;
+			status = "okay";
+		};
+		board-thermal {
+			polling-delay-passive = <0>;
+			polling-delay = <0>;
+			thermal-sensors = <&board_ntc>;
+		};
+	};
+	pa_sensor: pa-sensor {
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0x0>;
+		io-channels = <&sc2730_adc 0x4>;
+		io-channel-names = "sensor-channel";
+		temperature-lookup-table = <0xffff64c2 0x46b 0xffff8baf 0x456 0xffffb3e8 0x432 0xffffedb9 0x3d7 0x277e 0x346 0x60e5 0x28e 0xaf7a 0x19d 0xd677 0x13c 0xfd7f 0xee 0x12484 0xb2 0x14b93 0x85 0x172a3 0x64 0x199b0 0x4b 0x1c0c9 0x39 0x1e7c8 0x2b>;
+		status = "okay";
+	};
+	pa5g_sensor: pa5g-sensor {
+		compatible = "generic-adc-thermal";
+		#thermal-sensor-cells = <0x0>;
+		io-channels = <&sc2730_adc 0x6>;
+		io-channel-names = "sensor-channel";
+		temperature-lookup-table = <0xffff64c2 0x46b 0xffff8baf 0x456 0xffffb3e8 0x432 0xffffedb9 0x3d7 0x277e 0x346 0x60e5 0x28e 0xaf7a 0x19d 0xd677 0x13c 0xfd7f 0xee 0x12484 0xb2 0x14b93 0x85 0x172a3 0x64 0x199b0 0x4b 0x1c0c9 0x39 0x1e7c8 0x2b>;
+		status = "okay";
+	};
+	board_ntc: board-sensor {
+	 compatible = "generic-adc-thermal";
+	 #thermal-sensor-cells = <0>;
+	 io-channels = <&sc2730_adc 2>;
+	 io-channel-names = "sensor-channel";
+	 /* SY108 47k NTC table, V=180000*R/(5600000+156*R), in mV. */
+	 temperature-lookup-table = <(-40000) 1131
+	  (-35000) 1122
+	  (-30000) 1110
+	  (-25000) 1094
+	  (-20000) 1074
+	  (-15000) 1049
+	  (-10000) 1019
+	  (-5000) 983
+	  (0) 940
+	  (5000) 892
+	  (10000) 838
+	  (15000) 779
+	  (20000) 718
+	  (25000) 654
+	  (30000) 591
+	  (35000) 528
+	  (40000) 469
+	  (45000) 413
+	  (50000) 362
+	  (55000) 316
+	  (60000) 275
+	  (65000) 238
+	  (70000) 206
+	  (75000) 178
+	  (80000) 154
+	  (85000) 133
+	  (90000) 115
+	  (95000) 100
+	  (100000) 86
+	  (105000) 75
+	  (110000) 65
+	  (115000) 57
+	  (120000) 50
+	  (125000) 43>;
+	};
+};
+
+/ {
+	cluster0_sensor: cluster0-sensor {
+		compatible = "sprd,cluster0-thermal";
+		#thermal-sensor-cells = <0x1>;
+		sensor-names = "ank0-thermal", "ank1-thermal";
+		k-po = <0x80>;
+		k-pu = <0x100>;
+		k-i = <0x1>;
+		k-d = <0x0>;
+		cutoff = <0x0>;
+		status = "okay";
+	};
+};
+
+/ {
+	soc_sensor: soc-sensor {
+		compatible = "sprd,soc-thermal";
+		#thermal-sensor-cells = <0x1>;
+		sensor-names = "cluster0-thermal";
+		k-po = <0x0>;
+		k-pu = <0x0>;
+		k-i = <0x1>;
+		k-d = <0x0>;
+		cutoff = <0x0>;
+		status = "okay";
+	};
+};
+
+/ {
+	model = "SY108 UDX710 CPE";
+	compatible = "sprd,sy108", "sprd,udx710";
+
+	/* Installed board RAM; retain the installed memory node path. */
+	memory: memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x20000000>;
+	};
+
+	/* Keep the board RAM reference out of the common SoC description. */
+	sprd-sysdump {
+		memory-region = <&memory>;
+	};
+};
 
 /* Board devices shared by direct-root OpenWrt and the independent RAM Recovery. */
-#include "udx710-sy108-unused.dtsi"
-
+/* Unused SDIO, MIPI modem-debug outputs and USB0 stay disabled. Their
+ * shared clock, syscon and PMIC providers also serve retained consumers. */
+&{/soc/ap-ahb-bus/sdio@26100000} {
+	status = "disabled";
+};
+&{/soc/aon-bus/modem-dbg-log@63610000} {
+	status = "disabled";
+};
+&{/soc/aon-bus/modem-dbg-log@63620000} {
+	status = "disabled";
+};
+&{/soc/aon-bus/modem-dbg-log@63630000} {
+	status = "disabled";
+};
+&{/soc/ipa-bus/usb3@21400000} {
+	status = "disabled";
+};
+&{/soc/ipa-bus/usb3@21400000/usb@21400000} {
+	status = "disabled";
+};
+&usb0_phy {
+	status = "disabled";
+};
 &{/chosen} {
- bootargs = "console=ttyS0,115200n8 earlycon loglevel=7 rdinit=/init";
- udx,trial-rtc-stages;
- udx,trial-stage-schema = <6>;
- udx,trial-local-lease;
+	bootargs = "console=ttyS0,115200n8 earlycon loglevel=7 rdinit=/init";
+	udx,trial-rtc-stages;
+	udx,trial-stage-schema = <6>;
+	udx,trial-local-lease;
 };
 
-&pcc { status = "disabled"; };
-&p182 { /delete-property/ sprd,pamu3-offload; };
-&{/soc/ipa/pcie0@2b100000} { status = "disabled"; };
-
-/* Orca selector 3: 195 MHz 2x, retaining the qualified 307.2 MHz ECC source. */
-&{/soc/ap-ahb/nand-controller@21300000} {
- status = "okay";
- clocks = <&p3 0x2e &p4 0x2 &p5 0x1 &p5 0xe
-           &p2 0x1 &p2 0x2 &p2 0x3 &p6 0x69 &p6 0x6a>;
-};
-
-#include "udx710-sy108-mcu.dtsi"
-/* Linux owns all MTD partitions for in-system maintenance. */
-&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@0} {
- /delete-property/ read-only;
-};
-&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@40000} {
- /delete-property/ read-only;
-};
-&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@180000} {
- /delete-property/ read-only;
-};
-&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@240000} {
- /delete-property/ read-only;
-};
-&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@260000} {
- /delete-property/ read-only;
-};
-&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@3a0000} {
- /delete-property/ read-only;
-};
-&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@460000} {
- /delete-property/ read-only;
-};
-&{/soc/ap-ahb/nand-controller@21300000/nand@0/partitions/partition@480000} {
- /delete-property/ read-only;
-};
-/* Board-used MCU UART; the SoC provides its clocks and PM interrupt proxy. */
+/* SY108 MCU UART selection and raw reset/wake levels from the board driver.
+ * Shared clock providers and the PM interrupt proxy remain at platform scope.
+ */
 &{/aliases} {
- serial1 = "/soc/aon/serial@620e0000";
+	serial1 = "/soc/aon-bus/serial@620e0000";
 };
-&p16 {
- status = "okay";
+&{/soc/aon-bus/serial@620e0000} {
+	status = "okay";
+	board_mcu: mcu {
+		compatible = "meig,sy108-mcu";
+		rst-mcu-gpios = <&gpio 70 0>;
+		wkup-mcu-gpios = <&gpio 71 0>;
+		#io-channel-cells = <1>;
+	};
 };
-&{/soc/aon/serial@620e0000} {
- status = "okay";
+
+/* Keep the existing SP-AHB clock selection at board scope. */
+&sp_ahb_gate {
+	status = "okay";
 };
 /* DDR firmware queries require a running PM_SYS transport. */
 &{/scene-frequency} {
- status = "okay";
+	status = "okay";
 };
 /* Load the board's PM firmware before opening MCU/DDR/baseband services.
  * The SIPC endpoint releases CM4 only after its mailbox receiver exists. */
 &pmsys {
- sprd,firmware-volume = "nr_pmsys";
- status = "okay";
+	firmware-name = "sprd/udx710-pmsys.bin";
+	status = "okay";
 };
-&{/sipc@0} {
- sprd,pm-sys = <&pmsys>;
+&{/sipc-sipc-pmsys} {
+	sprd,pm-sys = <&pmsys>;
+};
+
+/* Board CPU policy consumed by the existing Orca cpufreq driver. */
+&cpu0 {
+	cpufreq-data-v1 = <&cpufreq_clus0>;
+};
+
+&cpu1 {
+	cpufreq-data-v1 = <&cpufreq_clus0>;
 };

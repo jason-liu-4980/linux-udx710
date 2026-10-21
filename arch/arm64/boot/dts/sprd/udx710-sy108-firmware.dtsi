@@ -1,0 +1,344 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* SY108 OEM firmware ABI: DRAM reservations, load windows and SIPC buffer geometry.
+ * The modem reg override repeats the three fixed SoC IRAM resources because
+ * the existing loader consumes one ordered array. Do not reorder its entries. */
+/ {
+	reserved-memory {
+		#address-cells = <0x2>;
+		#size-cells = <0x2>;
+		ranges;
+		ddrbist_mem: ddrbist-mem@80000000 {
+			reg = <0x0 0x80000000 0x0 0x1000>;
+			no-map;
+		};
+		sml-mem@85300000 {
+			reg = <0x0 0x85300000 0x0 0x20000>;
+			no-map;
+		};
+		audiodsp_mem_86e00000: audiodsp-mem@86e00000 {
+			reg = <0x0 0x86e00000 0x0 0x600000>;
+			no-map;
+		};
+		audio_mem_87400000: audio-mem@87400000 {
+			reg = <0x0 0x87400000 0x0 0x200000>;
+			no-map;
+		};
+		sipc_mem: sipc-mem@87800000 {
+			reg = <0x0 0x87800000 0x0 0x800000>;
+			no-map;
+		};
+		cp_mem: cp-modem@88000000 {
+			reg = <0x0 0x88000000 0x0 0x11000000>;
+			no-map;
+		};
+		nrphy_iqmem: nrphy-iqmem@99000000 {
+			reg = <0x0 0x99000000 0x0 0x3000000>;
+			status = "disabled";
+		};
+		sysdump-uboot@9f000000 {
+			compatible = "detour-mem";
+			reg = <0x0 0x9f000000 0x0 0xfc0000>;
+			no-map;
+		};
+	};
+	sprd-sysdump {
+		/* The third legacy dump slot has no region on this board. */
+		memory-region-re = <&ddrbist_mem &cp_mem 0 &sipc_mem &nrphy_iqmem>;
+	};
+	audio-mem-mgr {
+		compatible = "sprd,audio-mem-orca";
+		ddr32-ap-dsp-map-offset = <0x0>;
+		sprd,cmdaddr = <0x87400000 0x400>;
+		sprd,smsg-addr = <0x87400400 0xa10>;
+		sprd,ddr32-dspmemdump = <0x87400e10 0x80000>;
+		sprd,shmaddr-aud-str = <0x87480e10 0x400>;
+		sprd,shmaddr-dsp-vbc = <0x87481210 0x1400>;
+		sprd,shmaddr-nxp = <0x87482610 0x400>;
+		sprd,shmaddr-dsp-smartpa = <0x87482a10 0x1000>;
+		sprd,shmaddr-reg-dump = <0x87483a10 0x400>;
+		sprd,ddr32-dma = <0x87500000 0x100000>;
+		sprd,audcp-aon-iram = <0x7400 0x1000>;
+		memory-region = <&audio_mem_87400000 &audiodsp_mem_86e00000>;
+		status = "disabled";
+	};
+	scene-frequency {
+		compatible = "sprd,dfs";
+		freq-num = <0x7>;
+		status = "disabled";
+	};
+	spipe-slog-pm {
+		compatible = "sprd,spipe";
+		sprd,name = "slog_pm";
+		sprd,dst = <0x6>;
+		sprd,channel = <0x5>;
+		sprd,ringnr = <0x1>;
+		sprd,size-rxbuf = <0x400>;
+		sprd,size-txbuf = <0x0>;
+		status = "okay";
+	};
+	spipe-sctl-pm {
+		compatible = "sprd,spipe";
+		sprd,name = "sctl_pm";
+		sprd,dst = <0x6>;
+		sprd,channel = <0x6>;
+		sprd,ringnr = <0x1>;
+		sprd,size-rxbuf = <0x40>;
+		sprd,size-txbuf = <0x40>;
+		status = "okay";
+	};
+	spipe-spipe-lte {
+		compatible = "sprd,spipe";
+		sprd,name = "spipe_lte";
+		sprd,dst = <0x5>;
+		sprd,channel = <0x4>;
+		sprd,ringnr = <0xf>;
+		sprd,size-rxbuf = <0x1000>;
+		sprd,size-txbuf = <0x1000>;
+		status = "okay";
+	};
+	spipe-sdiag-lte {
+		compatible = "sprd,spipe";
+		sprd,name = "sdiag_lte";
+		sprd,dst = <0x5>;
+		sprd,channel = <0x15>;
+		sprd,ringnr = <0x1>;
+		sprd,size-rxbuf = <0x40000>;
+		sprd,size-txbuf = <0x8000>;
+		status = "okay";
+	};
+	spipe-wwan-at {
+		compatible = "sprd,udx710-wwan-at";
+		sprd,modem = <&modem>;
+		status = "okay";
+	};
+	spipe-spipe-nr {
+		compatible = "sprd,spipe";
+		sprd,name = "spipe_nr";
+		sprd,dst = <0x0>;
+		sprd,channel = <0x4>;
+		sprd,ringnr = <0xf>;
+		sprd,size-rxbuf = <0x1000>;
+		sprd,size-txbuf = <0x1000>;
+		status = "disabled";
+	};
+	spipe-sdiag-nr {
+		compatible = "sprd,spipe";
+		sprd,name = "sdiag_nr";
+		sprd,dst = <0x0>;
+		sprd,channel = <0x15>;
+		sprd,ringnr = <0x1>;
+		sprd,size-rxbuf = <0x40000>;
+		sprd,size-txbuf = <0x8000>;
+		status = "disabled";
+	};
+	spipe-stty-nr {
+		compatible = "sprd,spipe";
+		sprd,name = "stty_nr";
+		sprd,dst = <0x0>;
+		sprd,channel = <0x6>;
+		sprd,ringnr = <0x20>;
+		sprd,size-rxbuf = <0x800>;
+		sprd,size-txbuf = <0x800>;
+		status = "disabled";
+	};
+	spipe-snv-lte {
+		compatible = "sprd,spipe";
+		sprd,name = "snv_lte";
+		sprd,dst = <0x5>;
+		sprd,channel = <0x28>;
+		sprd,ringnr = <0x1>;
+		sprd,size-rxbuf = <0x40400>;
+		sprd,size-txbuf = <0x1000>;
+		status = "okay";
+	};
+	spipe-snv-nr {
+		compatible = "sprd,spipe";
+		sprd,name = "snv_nr";
+		sprd,dst = <0x0>;
+		sprd,channel = <0x28>;
+		sprd,ringnr = <0x1>;
+		sprd,size-rxbuf = <0x40400>;
+		sprd,size-txbuf = <0x1000>;
+		status = "disabled";
+	};
+	spool-slog-lte {
+		compatible = "sprd,spool";
+		sprd,name = "slog_lte";
+		sprd,dst = <0x5>;
+		sprd,channel = <0x5>;
+		sprd,preconfigured = <0x1>;
+		sprd,tx-blksize = <0x0>;
+		sprd,tx-blknum = <0x0>;
+		sprd,rx-blksize = <0x800>;
+		sprd,rx-blknum = <0x320>;
+		status = "okay";
+	};
+	spool-slog-nr-phy {
+		compatible = "sprd,spool";
+		sprd,name = "slog_nr_phy";
+		sprd,dst = <0x7>;
+		sprd,channel = <0x5>;
+		sprd,preconfigured = <0x1>;
+		sprd,tx-blksize = <0x0>;
+		sprd,tx-blknum = <0x0>;
+		sprd,rx-blksize = <0x800>;
+		sprd,rx-blknum = <0x3e8>;
+		status = "okay";
+	};
+	spool-slog-v3-phy {
+		compatible = "sprd,spool";
+		sprd,name = "slog_v3_phy";
+		sprd,dst = <0x8>;
+		sprd,channel = <0x5>;
+		sprd,preconfigured = <0x1>;
+		sprd,tx-blksize = <0x0>;
+		sprd,tx-blknum = <0x0>;
+		sprd,rx-blksize = <0x800>;
+		sprd,rx-blknum = <0x3e8>;
+		status = "okay";
+	};
+	spool-slog-xc4500-0 {
+		compatible = "sprd,spool";
+		sprd,name = "slog_xc4500_0";
+		sprd,dst = <0x1>;
+		sprd,channel = <0x5>;
+		sprd,tx-blksize = <0x0>;
+		sprd,tx-blknum = <0x0>;
+		sprd,rx-blksize = <0x800>;
+		sprd,rx-blknum = <0xfa>;
+		status = "okay";
+	};
+	spool-slog-xc4500-1 {
+		compatible = "sprd,spool";
+		sprd,name = "slog_xc4500_1";
+		sprd,dst = <0x2>;
+		sprd,channel = <0x5>;
+		sprd,tx-blksize = <0x0>;
+		sprd,tx-blknum = <0x0>;
+		sprd,rx-blksize = <0x800>;
+		sprd,rx-blknum = <0xfa>;
+		status = "okay";
+	};
+	spool-slog-nr {
+		compatible = "sprd,spool";
+		sprd,name = "slog_nr";
+		sprd,dst = <0x0>;
+		sprd,channel = <0x5>;
+		sprd,tx-blksize = <0x0>;
+		sprd,tx-blknum = <0x0>;
+		sprd,rx-blksize = <0x10000>;
+		sprd,rx-blknum = <0x80>;
+		status = "disabled";
+	};
+};
+
+&modem {
+	memory-region = <&cp_mem>;
+	reg = <0x0 0x2000 0x0 0x1000>,
+		      <0x0 0x4000 0x0 0x1000>,
+		      <0x0 0x5000 0x0 0x1000>,
+		      <0x0 0x8f820000 0x0 0x1030000>,
+		      <0x0 0x97000000 0x0 0x600000>,
+		      <0x0 0x93000000 0x0 0x400000>,
+		      <0x0 0x93310000 0x0 0x80000>,
+		      <0x0 0x93390000 0x0 0x100000>,
+		      <0x0 0x88700000 0x0 0x100000>,
+		      <0x0 0x8a602400 0x0 0x800>,
+		      <0x0 0x96800000 0x0 0x700000>,
+		      <0x0 0x8d355000 0x0 0x900000>;
+	reg-names = "cp-iram", "v3-iram", "nr-iram", "modem", "v3phy", "nrphy", "nrdsp1", "nrdsp2", "deltanv", "cpcmdline", "fixnv", "runnv";
+	firmware-name = "sprd/udx710-cp/modem.bin",
+			"sprd/udx710-cp/v3phy.bin",
+			"sprd/udx710-cp/nrphy.bin",
+			"sprd/udx710-cp/nrdsp1.bin",
+			"sprd/udx710-cp/nrdsp2.bin",
+			"sprd/udx710-cp/deltanv.bin",
+			"sprd/udx710-cp/cpcmdline.bin",
+			"sprd/udx710-cp/fixnv.bin",
+			"sprd/udx710-cp/runnv.bin";
+	sprd,cp-iram-data = <0xe3a01000 0xee061f12 0xf57ff06f 0xe3a01102 0xee061f11 0xe3a01039 0xee061f51 0xe300110f 0xee061f91 0xe3a01001 0xee061f12 0xf57ff06f 0xe3a01000 0xee061f11 0xe3a0103d 0xee061f51 0xe3011101 0xee061f91 0xe3a01002 0xee061f12 0xf57ff06f 0xe3a01000 0xee061f11 0xe3a01017 0xee061f51 0xe3a01f43 0xee061f91 0xee110f10 0xe3800001 0xf57ff04f 0xee010f10 0xf57ff06f 0xe51ff004 0x8f820600 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0 0x0>;
+	sprd,v3-iram-data = <0xe3a01000 0xee061f12 0xf57ff06f 0xe3a01102 0xee061f11 0xe3a01039 0xee061f51 0xe300110f 0xee061f91 0xe3a01001 0xee061f12 0xf57ff06f 0xe3a01000 0xee061f11 0xe3a0103d 0xee061f51 0xe3011101 0xee061f91 0xe3a01002 0xee061f12 0xf57ff06f 0xe3a01000 0xee061f11 0xe3a01017 0xee061f51 0xe3a01f43 0xee061f91 0xee110f10 0xe3800001 0xf57ff04f 0xee010f10 0xf57ff06f 0xe59f0034 0xe5901020 0xe3c11007 0xe3811004 0xe5801020 0xe59010f8 0xe3c11007 0xe3811002 0xe58010f8 0xe59010fc 0xe3c11007 0xe3811002 0xe58010fc 0xe51ff004 0x97000600 0x40590000 0x0>;
+	sprd,nr-iram-data = <0xe3a01000 0xee061f12 0xf57ff06f 0xe3a01102 0xee061f11 0xe3a01039 0xee061f51 0xe300110f 0xee061f91 0xe3a01001 0xee061f12 0xf57ff06f 0xe3a01000 0xee061f11 0xe3a0103d 0xee061f51 0xe3011101 0xee061f91 0xe3a01002 0xee061f12 0xf57ff06f 0xe3a01000 0xee061f11 0xe3a01017 0xee061f51 0xe3a01f43 0xee061f91 0xe3a01003 0xee061f12 0xf57ff06f 0xe3a01312 0xee061f11 0xe3a01027 0xee061f51 0xe3a01f43 0xee061f91 0xee110f10 0xe3800001 0xf57ff04f 0xee010f10 0xf57ff06f 0xe51ff004 0x93000600 0x0 0x0 0x0 0x0 0x0 0x0>;
+	status = "okay";
+};
+
+&{/sipc-sipc-lte} {
+	sprd,smem-info = <0x87800000 0x87800000 0x300000>;
+};
+
+&{/sipc-sipc-nr-phy} {
+	sprd,smem-info = <0x87b00000 0x87b00000 0x200000>;
+};
+
+&{/sipc-sipc-v3-phy} {
+	sprd,smem-info = <0x87d00000 0x87d00000 0x200000>;
+};
+
+&{/sipc-sipc-xc4500-0} {
+	sprd,smem-info = <0x87f00000 0x87f00000 0x80000>;
+};
+
+&{/sipc-sipc-xc4500-1} {
+	sprd,smem-info = <0x87f80000 0x87f80000 0x80000>;
+};
+
+&{/sipc-sipc-nr} {
+	sprd,smem-info = <0x89600000 0x89600000 0x3000000>;
+};
+
+&{/sipc-sipc-pmsys} {
+	status = "okay";
+};
+&{/sipc-sipc-lte} {
+	status = "okay";
+};
+&{/sipc-sipc-nr-phy} {
+	status = "okay";
+};
+&{/sipc-sipc-v3-phy} {
+	status = "okay";
+};
+&{/sipc-sipc-xc4500-0} {
+	status = "okay";
+};
+&{/sipc-sipc-xc4500-1} {
+	status = "okay";
+};
+&{/soc/sipa-dele@89600000} {
+	reg = <0x0 0x89600000 0x0 0x4000000 0x0 0x21180000 0x0 0x10000>;
+};
+
+&{/soc/sipa-dele@89600000} {
+	reg-names = "mem-base", "reg-base";
+	sprd,ul-fifo-depth = <0x1000>;
+	sprd,dl-fifo-depth = <0x1000>;
+	status = "okay";
+};
+
+&sipa {
+	sprd,tft-mode;
+	sprd,sipa-bypass-mode = <0x0>;
+	sprd,usb-dl-tx = <0x0 0x1000>;
+	sprd,usb-dl-rx = <0x0 0x1000>;
+	sprd,usb-ul-tx = <0x0 0x800>;
+	sprd,usb-ul-rx = <0x0 0x800>;
+	sprd,cp-dl-tx = <0x0 0x0>;
+	sprd,cp-dl-rx = <0x0 0x0>;
+	sprd,cp-ul-tx = <0x0 0x0>;
+	sprd,cp-ul-rx = <0x0 0x0>;
+	sprd,wifi-dl-tx = <0x0 0x0>;
+	sprd,wifi-dl-rx = <0x0 0x0>;
+	sprd,wifi-ul-tx = <0x0 0x0>;
+	sprd,wifi-ul-rx = <0x0 0x0>;
+	sprd,ap-eth-dl-tx = <0x0 0x1000>;
+	sprd,ap-eth-dl-rx = <0x0 0x1000>;
+	sprd,ap-eth-ul-tx = <0x0 0x1000>;
+	sprd,ap-eth-ul-rx = <0x0 0x1000>;
+	sprd,ap-ip-dl-tx = <0x0 0x40>;
+	sprd,ap-ip-dl-rx = <0x0 0x40>;
+	sprd,ap-ip-ul-tx = <0x0 0x1000>;
+	sprd,ap-ip-ul-rx = <0x0 0x1000>;
+	sprd,from-pcie-no-mac = <0x0>;
+	sprd,to-pcie-no-mac = <0x0>;
+	status = "okay";
+};

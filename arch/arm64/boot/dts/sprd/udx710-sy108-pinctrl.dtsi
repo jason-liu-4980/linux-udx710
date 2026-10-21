@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* SY108 pin states referenced by retained controller descriptions. */
+
+&pinctrl {
+	pin_iis_matrix_cfg_inf0_a: iis-matrix-cfg-inf0-a-pins {
+		pins = "ROC1_IIS_INF0_SYS_SEL";
+		sprd,control = <0xa>;
+		status = "disabled";
+	};
+	pin_iis_matrix_cfg_inf0_d: iis-matrix-cfg-inf0-d-pins {
+		pins = "ROC1_IIS_INF0_SYS_SEL";
+		sprd,control = <0xd>;
+		status = "disabled";
+	};
+	pin_vbc_iis_inf_sys_0: vbc-iis-inf-sys-0-pins {
+		pins = "ROC1_VBC_IIS_INF_SYS_SEL";
+		sprd,control = <0x0>;
+		status = "disabled";
+	};
+	pin_vbc_iis_inf_sys_1: vbc-iis-inf-sys-1-pins {
+		pins = "ROC1_VBC_IIS_INF_SYS_SEL";
+		sprd,control = <0x1>;
+		status = "disabled";
+	};
+	pin_iis_matrix_cfg_inf1_d: iis-matrix-cfg-inf1-d-pins {
+		pins = "ROC1_IIS_INF1_SYS_SEL";
+		sprd,control = <0xd>;
+		status = "disabled";
+	};
+};

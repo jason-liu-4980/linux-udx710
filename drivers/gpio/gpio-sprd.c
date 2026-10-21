@@ -261,15 +261,7 @@ static int sprd_gpio_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id sprd_gpio_of_match[] = {
-	{
-		.compatible = "sprd,sc9860-gpio",
-	},
-	{
-		.compatible = "sprd,sharkl5-gpio",
-	},
-	{
-		.compatible = "sprd,orca-gpio",
-	},
+	{ .compatible = "sprd,sc9860-gpio", },
 	{ /* end of list */ }
 };
 MODULE_DEVICE_TABLE(of, sprd_gpio_of_match);
@@ -285,4 +277,4 @@ static struct platform_driver sprd_gpio_driver = {
 module_platform_driver_probe(sprd_gpio_driver, sprd_gpio_probe);
 
 MODULE_DESCRIPTION("Spreadtrum GPIO driver");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL v2");

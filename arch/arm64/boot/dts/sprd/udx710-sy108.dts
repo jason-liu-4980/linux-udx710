@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* New boot-policy ABI. Used by native U-Boot and OpenWrt/Recovery. */
+/* SY108 Main: direct UBI root and USB peripheral offload. */
 /dts-v1/;
 #include "udx710-sy108.dtsi"
 &{/chosen} {
@@ -9,7 +9,7 @@
 	bootargs = "console=ttyS0,115200n8 earlycon loglevel=7 udx.nv=native-exclusive ubi.mtd=ubipac ubi.block=0,rootfs root=/dev/ubiblock0_21 rootfstype=squashfs ro rootwait";
 };
 
-&{/soc/sprd,sipa@2E000000} {
+&{/soc/ipa@2e000000} {
 	/* Peripheral-to-AP Ethernet receive queue (FIFO 23). CP shared queues
 	 * and the separate raw-IP endpoint retain their OEM geometry. */
 	sprd,ap-eth-ul-tx = <0 1024>;
@@ -18,13 +18,13 @@
 
 /* SY108 PAM U3 USB peripheral offload. Recovery uses the software path. */
 
-&pcc {
+&pamu3 {
 	/* Independent PAM reset; USB1 remains live for management. */
-	resets = <&p180 2>;
+	resets = <&usb_reset 2>;
 	status = "okay";
 };
 
-&p182 {
+&usb1_dwc3 {
 	sprd,pamu3-offload;
 	/* The programmed 5160-byte RX FIFO holds five 1024-byte packets plus
 	 * setup/clock-crossing space. Wait for four free packet slots before
