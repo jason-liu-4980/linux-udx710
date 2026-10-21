@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/iio/adc/meig,sy108-mcu.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: SY108 board management MCU
+
+description: |
+  The SY108 MCU communicates over a 115200 baud, 8N1 UART. It exposes
+  ADC channels 3 through 5 and reports board power and USB reset requests.
+  The reset and wake GPIOs retain the levels required by the board firmware.
+
+maintainers:
+  - jason-liu-4980 <38558962+jason-liu-4980@users.noreply.github.com>
+
+allOf:
+  - $ref: /schemas/serial/serial-peripheral-props.yaml#
+
+properties:
+  compatible:
+    const: meig,sy108-mcu
+
+  rst-mcu-gpios:
+    maxItems: 1
+    description: MCU reset line, held low during normal operation.
+
+  wkup-mcu-gpios:
+    maxItems: 1
+    description: MCU wake line, held high during normal operation.
+
+  '#io-channel-cells':
+    const: 1
+    description: ADC channel number, from 3 through 5.
+
+required:
+  - compatible
+  - rst-mcu-gpios
+  - wkup-mcu-gpios
+  - '#io-channel-cells'
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    serial {
+        mcu {
+            compatible = "meig,sy108-mcu";
+            rst-mcu-gpios = <&gpio 70 0>;
+            wkup-mcu-gpios = <&gpio 71 0>;
+            #io-channel-cells = <1>;
+        };
+    };

@@ -25,16 +25,21 @@ properties:
     maxItems: 1
   vdd-supply: true
   sprd,vdd-voltage:
+    description: PHY analog supply voltage in microvolts.
     $ref: /schemas/types.yaml#/definitions/uint32
     minimum: 1200000
     maximum: 3750000
   sprd,syscon-anag4:
+    description: Shared analog control register bank.
     $ref: /schemas/types.yaml#/definitions/phandle
   sprd,syscon-aon-apb:
+    description: Always-on APB control register bank used by the PHY.
     $ref: /schemas/types.yaml#/definitions/phandle
   sprd,syscon-ap-ahb:
+    description: AP AHB control register bank used by USB0.
     $ref: /schemas/types.yaml#/definitions/phandle
   sprd,syscon-ipa-ahb:
+    description: IPA AHB control register bank used by USB1.
     $ref: /schemas/types.yaml#/definitions/phandle
 required:
   - compatible

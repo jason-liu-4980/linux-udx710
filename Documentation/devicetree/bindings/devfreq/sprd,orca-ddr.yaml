@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/devfreq/sprd,orca-ddr.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Spreadtrum Orca firmware DDR frequency interface
+
+maintainers:
+  - Orson Zhai <orsonzhai@gmail.com>
+  - Baolin Wang <baolin.wang7@gmail.com>
+
+description: |
+  The DDR driver queries the frequency table and current state through the
+  PM_SYS SIPC control channel. Firmware owns frequency selection and training;
+  this interface exposes monitoring through devfreq. No MMIO OPP table is
+  supplied by this node.
+
+properties:
+  compatible:
+    const: sprd,dfs
+  freq-num:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 1
+    description: Number of entries in the peer firmware's frequency table.
+
+required: [compatible, freq-num]
+additionalProperties: false

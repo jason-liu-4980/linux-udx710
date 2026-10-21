@@ -65,7 +65,7 @@ required:
 
 oneOf:
   - required: [reg]
-  - required: [sprd,syscon]
+  - required: ['sprd,syscon']
 
 allOf:
   - if:

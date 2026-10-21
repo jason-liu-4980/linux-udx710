@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/sprd,udx710-wwan-at.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Unisoc UDX710 native SBUF AT streams
+
+maintainers:
+  - jason-liu-4980 <38558962+jason-liu-4980@users.noreply.github.com>
+
+description: |
+  The PSCP SIPC destination 5 channel 6 contains 32 original shared-memory
+  rings with 2048-byte RX and TX areas per ring. Ring 0 carries unsolicited
+  AT notifications and ring 1 carries commands and responses. The remaining
+  ring slots remain part of the firmware layout. Both AT ports belong to
+  the same modem as the SIPA data links.
+
+properties:
+  compatible:
+    const: sprd,udx710-wwan-at
+
+  sprd,modem:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Modem platform device shared with the SIPA WWAN links.
+
+required:
+  - compatible
+  - sprd,modem
+
+additionalProperties: false
+
+examples:
+  - |
+    modem-at {
+        compatible = "sprd,udx710-wwan-at";
+        sprd,modem = <&modem>;
+    };

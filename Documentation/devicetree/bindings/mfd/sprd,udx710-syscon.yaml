@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mfd/sprd,udx710-syscon.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Unisoc UDX710 system and analog register banks
+
+maintainers:
+  - Orson Zhai <orsonzhai@gmail.com>
+  - Baolin Wang <baolin.wang7@gmail.com>
+
+description: |
+  Register banks shared by the UDX710 clock, reset, PHY and coprocessor
+  controllers. The AP/PMU/AON compatibles are retained platform interfaces.
+  The analog G0/G1/G2/G3/G4/G5/G8/G9/G10/G11 and AP interrupt banks follow the
+  UDX710 register map; each AP interrupt bank has the same register layout.
+
+properties:
+  compatible:
+    items:
+      - enum:
+          - sprd,sys-ap-ahb
+          - sprd,sys-ap-apb
+          - sprd,sys-ap-ipa-ahb
+          - sprd,sys-pmu-apb
+          - sprd,sys-aon-apb
+          - sprd,udx710-anlg-g0-syscon
+          - sprd,udx710-anlg-g1-syscon
+          - sprd,udx710-anlg-g10-syscon
+          - sprd,udx710-anlg-g11-syscon
+          - sprd,udx710-anlg-g2-syscon
+          - sprd,udx710-anlg-g3-syscon
+          - sprd,udx710-anlg-g4-syscon
+          - sprd,udx710-anlg-g5-syscon
+          - sprd,udx710-anlg-g8-syscon
+          - sprd,udx710-anlg-g9-syscon
+          - sprd,udx710-ap-intc-syscon
+          - sprd,udx710-audcp-ahb-syscon
+          - sprd,udx710-audcp-apb-syscon
+          - sprd,udx710-dmc-mpu-syscon
+          - sprd,udx710-pub-apb-syscon
+      - const: syscon
+  reg:
+    maxItems: 1
+  '#syscon-cells':
+    const: 2
+    description: Register offset and bit mask for legacy syscon specifiers.
+
+required: [compatible, reg]
+additionalProperties: false

@@ -1,0 +1,31 @@
+What:           /sys/bus/serial/devices/.../event
+Date:           October 2026
+Contact:        linux-iio@vger.kernel.org
+Description:
+                Read-only SY108 MCU event snapshot. It reports "none" before
+                any event, otherwise "seq=<number> kind=poweroff|usb-reset".
+                A power request awaiting orderly shutdown takes precedence
+                over the latest USB event, including during early boot.
+
+                The driver emits a change uevent with MCU_EVENT and MCU_SEQ.
+                USB ACKs are sent by the driver before the uevent. A pending
+                power ACK is attempted only from the SYS_POWER_OFF blocking
+                reboot notifier, before UART device shutdown. There is no
+                userspace ACK attribute. A restart does not send a power ACK.
+
+What:           /sys/bus/serial/devices/.../firmware_version
+Date:           October 2026
+Contact:        linux-iio@vger.kernel.org
+Description:
+                Read-only MCU firmware version returned by the UART protocol.
+                A transport error is returned to the reader.
+
+What:           /sys/bus/serial/devices/.../status
+Date:           October 2026
+Contact:        linux-iio@vger.kernel.org
+Description:
+                Read-only transport counters, including received frames,
+                protocol errors, ADC requests, timeouts, MCU events and ACK
+                attempts. last_ack_error is the result of the last UART write.
+                A completed write and transmit drain do not prove receipt by
+                the MCU. ADC3..5 use the standard IIO raw voltage attributes.

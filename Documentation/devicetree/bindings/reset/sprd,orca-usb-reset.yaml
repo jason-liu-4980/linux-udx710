@@ -17,8 +17,10 @@ properties:
   '#reset-cells':
     const: 1
   sprd,ap-ahb:
+    description: AP AHB system controller containing the USB0 reset bit.
     $ref: /schemas/types.yaml#/definitions/phandle
   sprd,ipa-ahb:
+    description: IPA AHB system controller containing the USB1 and PAM reset bits.
     $ref: /schemas/types.yaml#/definitions/phandle
 required: [compatible, '#reset-cells', 'sprd,ap-ahb', 'sprd,ipa-ahb']
 additionalProperties: false

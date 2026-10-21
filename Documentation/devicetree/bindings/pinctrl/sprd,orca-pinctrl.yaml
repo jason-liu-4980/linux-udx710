@@ -73,13 +73,22 @@ patternProperties:
         $ref: /schemas/types.yaml#/definitions/uint32
 
     patternProperties:
+      '^[a-z][a-z0-9-]*-pins$':
+        $ref: '#/$defs/pin-node'
+        unevaluatedProperties: false
+        description: Independently referenced pad configuration beneath a mux group.
+        properties:
+          sprd,sleep-mode:
+            $ref: /schemas/types.yaml#/definitions/uint32
+            maximum: 15
+            description: Sleep-domain selector of the pad register.
+
       '^[a-z][a-z0-9-]*-sleep$':
         $ref: '#/$defs/pin-node'
         unevaluatedProperties: false
 
         properties:
-          sleep-hardware-state:
-            const: true
+          sleep-hardware-state: true
           bias-pull-up:
             type: boolean
           output-high: false

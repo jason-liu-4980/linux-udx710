@@ -19,13 +19,34 @@ maintainers:
 
 properties:
   compatible:
-    const: sprd,sc9860-mcdt
+    enum:
+      - sprd,sc9860-mcdt
+      - sprd,roc1-mcdt
 
   reg:
     maxItems: 1
 
   interrupts:
     maxItems: 1
+
+  clocks:
+    maxItems: 1
+    description: Optional access clock, held while a channel is allocated.
+
+  sprd,ap-addr-offset:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Offset subtracted from the AP physical FIFO address to obtain the
+      address used by the ROC1 audio DMA controller.
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: sprd,sc9860-mcdt
+    then:
+      properties:
+        sprd,ap-addr-offset: false
 
 required:
   - compatible
@@ -43,5 +64,15 @@ examples:
       compatible = "sprd,sc9860-mcdt";
       reg = <0x41490000 0x170>;
       interrupts = <GIC_SPI 48 IRQ_TYPE_LEVEL_HIGH>;
+    };
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    mcdt@56490000 {
+      compatible = "sprd,roc1-mcdt";
+      reg = <0x56490000 0x170>;
+      interrupts = <GIC_SPI 118 IRQ_TYPE_LEVEL_HIGH>;
+      clocks = <&audio_access>;
+      sprd,ap-addr-offset = <0x55000000>;
     };
 ...

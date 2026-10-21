@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 %YAML 1.2
 ---
-$id: http://devicetree.org/schemas/soc/sprd/sprd,udx710-pmsys.yaml#
+$id: http://devicetree.org/schemas/remoteproc/sprd,udx710-pmsys.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
 title: Spreadtrum UDX710 PM_SYS Cortex-M4 firmware loader
@@ -10,7 +10,7 @@ maintainers:
   - jason-liu-4980 <38558962+jason-liu-4980@users.noreply.github.com>
 
 description: |
-  PM_SYS runs the board's original firmware from the named UBI volume. Its
+  PM_SYS runs the board's original raw firmware through the firmware loader. Its
   Cortex-M4 remains held in reset until the SIPC mailbox receiver is
   registered.
 
@@ -22,15 +22,15 @@ properties:
   sprd,aon-apb:
     $ref: /schemas/types.yaml#/definitions/phandle
     description: AON APB syscon containing the PM_SYS reset register.
-  sprd,firmware-volume:
+  firmware-name:
     $ref: /schemas/types.yaml#/definitions/string
-    const: nr_pmsys
-    description: Original firmware volume on the board's UBI device 0.
+    const: sprd/udx710-pmsys.bin
+    description: Original raw firmware prepared by userspace.
 
 required:
   - compatible
   - reg
   - sprd,aon-apb
-  - sprd,firmware-volume
+  - firmware-name
 
 additionalProperties: false

@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/sprd,orca-pamu3.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Unisoc ORCA PAM USB3 accelerator
+
+maintainers:
+  - jason-liu-4980 <38558962+jason-liu-4980@users.noreply.github.com>
+
+description: |
+  PAM connects the DWC3 endpoint DMA rings to SIPA. The supplier links
+  describe devices needed to prepare the rings; remote CP resource grants
+  and DMA completion remain runtime protocol events.
+
+properties:
+  compatible:
+    const: sprd,orca-pamu3
+  reg:
+    maxItems: 1
+  reg-names:
+    const: pamu3_glb_regs
+  clocks:
+    maxItems: 1
+  clock-names:
+    const: pamu3_clk
+  resets:
+    maxItems: 1
+  reset-names:
+    const: pamu3
+  sprd,dwc3:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: DWC3 controller whose endpoints are used by PAM.
+  sprd,sipa:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: SIPA packet accelerator supplying the shared FIFO interface.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+  - sprd,dwc3
+  - sprd,sipa
+
+additionalProperties: false

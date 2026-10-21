@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/reserved-memory/sprd,sysdump-uboot.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Spreadtrum bootloader dump reservation
+
+maintainers:
+  - Orson Zhai <orsonzhai@gmail.com>
+  - Baolin Wang <baolin.wang7@gmail.com>
+
+description: |
+  Legacy detour-mem reservation for the bootloader dump area. The installed
+  bootloader searches for the sysdump-uboot node name and rewrites its range;
+  the user-version SY108 fixup sets its size to zero. Preserve the legacy
+  compatible and node name for that interface.
+
+allOf:
+  - $ref: reserved-memory.yaml#
+
+properties:
+  compatible:
+    const: detour-mem
+  reg:
+    maxItems: 1
+
+required: [compatible, reg]
+unevaluatedProperties: false

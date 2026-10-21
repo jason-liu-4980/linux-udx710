@@ -31,10 +31,10 @@ properties:
   "#thermal-sensor-cells":
     const: 1
   sensor-names:
+    # The shared string-array type already enforces unique entries.
     $ref: /schemas/types.yaml#/definitions/string-array
     minItems: 1
     maxItems: 16
-    uniqueItems: true
     description: Names of enabled child nodes below /thermal-zones.
   k-po:
     $ref: /schemas/types.yaml#/definitions/uint32

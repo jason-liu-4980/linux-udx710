@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/watchdog/sprd,sc2730-wdt.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Spreadtrum SC2730 PMIC watchdog
+
+maintainers:
+  - Jason Liu <jason-liu-4980@users.noreply.github.com>
+
+description: |
+  The SC2730 watchdog is a 32-bit counter clocked at 32768 Hz. It is a
+  child of the PMIC and uses the parent ADI regmap. The reset-only driver
+  preserves an inherited running watchdog and does not support stopping it.
+
+allOf:
+  - $ref: watchdog.yaml#
+
+properties:
+  compatible:
+    const: sprd,sc2730-wdt
+
+  reg:
+    maxItems: 1
+
+  timeout-sec:
+    minimum: 1
+    maximum: 131071
+    default: 60
+
+required:
+  - compatible
+  - reg
+
+unevaluatedProperties: false

@@ -32,7 +32,7 @@ properties:
   phy-names:
     const: usb
 patternProperties:
-  '^dwc3@[0-9a-f]+$':
+  '^usb@[0-9a-f]+$':
     $ref: snps,dwc3.yaml#
     properties:
       dr_mode:

@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/cpufreq/sprd,orca-cluster.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Spreadtrum Orca legacy CPU cluster firmware parameters
+
+maintainers:
+  - Orson Zhai <orsonzhai@gmail.com>
+  - Baolin Wang <baolin.wang7@gmail.com>
+
+description: |
+  Parameters consumed through the CPU cpufreq-data-v1 phandle by the Orca
+  secure-firmware DVFS driver. These are configuration arguments to the
+  firmware service, not a static voltage/frequency table.
+
+select:
+  properties:
+    $nodename:
+      const: cpufreq-clus0
+  required: [$nodename]
+
+properties:
+  voltage-step:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Firmware CONFIG voltage argument in microvolts.
+  tuning-latency-us: true
+  boost-duration:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    const: 0
+    description: Legacy boot boost interval; not supported by the SIP driver.
+
+required: [voltage-step, tuning-latency-us, boost-duration]
+additionalProperties: false

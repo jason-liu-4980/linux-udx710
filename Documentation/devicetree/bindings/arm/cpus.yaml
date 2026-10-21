@@ -39,6 +39,10 @@ description: |+
   described below.
 
 properties:
+  cpufreq-data-v1:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Legacy Orca cluster parameters for the secure DVFS firmware.
+
   reg:
     maxItems: 1
     description: >

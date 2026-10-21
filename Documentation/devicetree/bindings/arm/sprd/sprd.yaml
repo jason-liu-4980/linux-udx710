@@ -40,6 +40,10 @@ properties:
               - sprd,ums9620-2h10
           - const: sprd,ums9620
 
+      - items:
+          - const: sprd,sy108
+          - const: sprd,udx710
+
 additionalProperties: true
 
 ...

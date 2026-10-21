@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/sprd/sprd,spool.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Spreadtrum SIPC shared block pool
+
+maintainers:
+  - Orson Zhai <orsonzhai@gmail.com>
+  - Baolin Wang <baolin.wang7@gmail.com>
+
+description: |
+  Legacy SIPC shared-memory endpoint instantiated for the firmware ABI.
+  These nodes describe protocol channels, not MMIO addresses. Destination
+  and channel select the existing SIPC transport; buffer geometry must agree
+  with the peer firmware.
+
+properties:
+  compatible:
+    const: sprd,spool
+  sprd,name:
+    $ref: /schemas/types.yaml#/definitions/string
+    description: Userspace device name.
+  sprd,dst:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: SIPC destination ID.
+  sprd,channel:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: SMSG channel ID.
+  sprd,tx-blksize:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: TX block size in bytes.
+  sprd,tx-blknum:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: TX block count; zero is valid for an unused direction.
+  sprd,rx-blksize:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: RX block size in bytes.
+  sprd,rx-blknum:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: RX block count; zero is valid for an unused direction.
+  sprd,preconfigured:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [0, 1]
+    description: Use the peer-preconfigured receive block pool.
+  sprd,nodev:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [0, 1]
+    description: Do not create a userspace character device.
+
+required:
+  - compatible
+  - sprd,name
+  - sprd,dst
+  - sprd,channel
+  - sprd,tx-blksize
+  - sprd,tx-blknum
+  - sprd,rx-blksize
+  - sprd,rx-blknum
+additionalProperties: false

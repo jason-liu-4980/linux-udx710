@@ -9,8 +9,11 @@ title: Spreadtrum Orca public read-only eFuse
 description: |
   The byte-addressed public region covers hardware blocks 2 through 46
   inclusive (180 bytes). Offset zero maps to hardware block 2. All public
-  blocks use the redundant double-bit read mode. The driver provides no
-  programming operation. Thermal calibration uses the standard NVMEM cell
+  blocks use the redundant double-bit read mode. The 8-byte UID at offset
+  0xb4 maps hardware blocks 0 and 1 in double-bit mode, with bit 31 of each
+  word cleared as in the original UID format. Calibration offsets remain
+  unchanged. The resulting read-only NVMEM view is 188 bytes. The driver
+  provides no programming operation. Thermal calibration uses the standard NVMEM cell
   bits property; no calibrated values are encoded in this binding.
 
 maintainers:
@@ -34,6 +37,9 @@ properties:
   hwlocks:
     maxItems: 1
 
+  nvmem-layout:
+    $ref: layouts/fixed-layout.yaml#
+
 required:
   - compatible
   - reg
@@ -43,7 +49,6 @@ required:
 
 allOf:
   - $ref: nvmem.yaml#
-  - $ref: nvmem-deprecated-cells.yaml#
 
 unevaluatedProperties: false
 
@@ -57,13 +62,20 @@ examples:
       clocks = <&aonapb_gate CLK_EFUSE_EB>;
       clock-names = "enable";
       hwlocks = <&hwlock 8>;
-      #address-cells = <1>;
-      #size-cells = <1>;
+      nvmem-layout {
+          compatible = "fixed-layout";
+          #address-cells = <1>;
+          #size-cells = <1>;
 
-      /* Data cells */
-      thermal_calib: calib@98 {
-        reg = <0x98 0x4>;
-        bits = <1 7>;
+          uid@b4 {
+            reg = <0xb4 0x8>;
+          };
+
+          /* Calibration cells */
+          thermal_calib: calib@98 {
+            reg = <0x98 0x4>;
+            bits = <1 7>;
+          };
       };
     };
 ...

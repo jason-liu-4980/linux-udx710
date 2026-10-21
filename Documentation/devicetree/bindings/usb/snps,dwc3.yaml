@@ -57,6 +57,12 @@ properties:
         - enum: [bus_early, ref, suspend]
         - true
 
+  sprd,pamu3-offload:
+    type: boolean
+    description: |
+      Orca PAM U3 shares this peripheral controller's event buffers and endpoint
+      resources. The PAM supplier references this controller by phandle.
+
   dma-coherent: true
 
   iommus:

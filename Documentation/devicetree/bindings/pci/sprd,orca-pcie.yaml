@@ -63,9 +63,11 @@ properties:
     properties:
       label:
         const: msi_int
-      interrupt-parent: true
+      # The legacy width marker does not make this child a provider.
+      interrupt-controller: false
       '#interrupt-cells':
         const: 3
+        description: Legacy specifier-width marker matching the GIC parent.
       interrupts:
         maxItems: 1
     required:

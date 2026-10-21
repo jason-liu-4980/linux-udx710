@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/sprd/sprd,sipc.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Unisoc interprocessor message transport
+
+maintainers:
+  - jason-liu-4980 <38558962+jason-liu-4980@users.noreply.github.com>
+
+description: |
+  SIPC carries short messages and shared-memory ring control between the
+  application processor and a remote processor. Mailbox channels identify
+  hardware destinations; sprd,dst identifies the SIPC protocol peer.
+
+properties:
+  compatible:
+    const: sprd,sipc
+  sprd,name:
+    $ref: /schemas/types.yaml#/definitions/string
+    description: Transport name used in driver diagnostics.
+  sprd,type:
+    $ref: /schemas/types.yaml#/definitions/string
+    enum: [mbox, pcie, ipi]
+    description: Hardware notification transport.
+  sprd,dst:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    maximum: 8
+    description: SIPC peer identifier.
+  sprd,core:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Mailbox destination, matching the smsg channel argument.
+  sprd,core_sensor:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Legacy sensor mailbox destination.
+  sprd,client:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [0, 1]
+    description: PCIe host (zero) or client (one) side.
+  sprd,ep-dev:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: PCIe endpoint device index on the host side.
+  sprd,ep-fun:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: PCIe endpoint function index on the client side.
+  sprd,rc-ctrl:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: PCIe root controller for the transport.
+  sprd,smem-type:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [0, 1]
+    description: Local (zero) or PCIe (one) shared memory.
+  sprd,smem-info:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    description: Local base, peer base, and size in bytes of the shared memory.
+    items:
+      - description: Local base
+      - description: Peer base
+      - description: Size in bytes
+  sprd,high-offset:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    description: High address offsets for local and peer shared memory.
+    items:
+      - description: Local offset
+      - description: Peer offset
+  sprd,pm-sys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: PM_SYS remote processor for this transport.
+  mboxes:
+    maxItems: 1
+  mbox-names:
+    const: smsg
+  interrupts:
+    maxItems: 1
+
+required:
+  - compatible
+  - sprd,name
+  - sprd,type
+  - sprd,dst
+  - sprd,smem-info
+
+allOf:
+  - if:
+      properties:
+        sprd,type:
+          const: mbox
+    then:
+      required:
+        - mboxes
+        - mbox-names
+
+additionalProperties: false
